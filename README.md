@@ -2,7 +2,7 @@
 
 A DNS server that blocks ad and tracker domains for your devices — a Pi-hole-style DNS filter written in Python.
 
-> **Status:** work in progress. This is a bachelor's thesis project.
+> **Status:** work in progress.
 
 ## Goal
 
