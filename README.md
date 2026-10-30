@@ -22,7 +22,7 @@ Python (`asyncio`), SQLite, REST API, Docker / Docker Compose, Prometheus, Grafa
 
 - [x] 1. Study how DNS works and existing solutions (Pi-hole, AdGuard Home)
 - [x] 2. Define functional and non-functional requirements
-- [ ] 3. Design the architecture and the database schema
+- [x] 3. Design the architecture and the database schema
 - [ ] 4. Build the resolver with caching and blocklist filtering
 - [ ] 5. Add statistics collection and a REST API
 - [ ] 6. Containerize the application and set up secure remote access
@@ -33,6 +33,7 @@ Python (`asyncio`), SQLite, REST API, Docker / Docker Compose, Prometheus, Grafa
 
 - [Goal 1 — Research: DNS, Pi-hole, AdGuard Home](docs/01-research.md) (in Russian)
 - [Goal 2 — Requirements: functional and non-functional requirements](docs/02-requirements.md) (in Russian)
+- [Goal 3 — Architecture and Database Design](docs/03-architecture.md) (in Russian)
 
 ## License
 
