@@ -17,12 +17,12 @@ class TrieNode:
     __slots__ = ("children", "is_end")
 
     def __init__(self) -> None:
-        self.children: dict[str, "TrieNode"] = {}
+        self.children: dict[str, TrieNode] = {}
         self.is_end: bool = False
 
 
 class MockRecord:
-    __slots__ = ("name", "rtype", "rclass", "ttl", "rdata")
+    __slots__ = ("name", "rclass", "rdata", "rtype", "ttl")
 
     def __init__(self, name: str, rtype: int, ttl: int, rdata: bytes) -> None:
         self.name = name
@@ -34,15 +34,15 @@ class MockRecord:
 
 class CacheEntry:
     __slots__ = (
-        "qname",
-        "qtype",
-        "records",
         "cname_targets",
-        "response_code",
         "created_at",
         "expires_at",
         "is_negative",
         "original_ttl",
+        "qname",
+        "qtype",
+        "records",
+        "response_code",
     )
 
     def __init__(
@@ -77,10 +77,11 @@ def benchmark() -> None:
     # 1. Замер frozenset
     tracemalloc.start()
     t0 = time.perf_counter()
-    fset = frozenset(domains)
+    _fset = frozenset(domains)
     t_fset = time.perf_counter() - t0
     _, peak_fset = tracemalloc.get_traced_memory()
     tracemalloc.stop()
+    del _fset
 
     # 2. Замер Trie на dict
     tracemalloc.start()
