@@ -276,3 +276,12 @@ Legend:
 - '-': Not scanned
 - '0': Clean (no security findings detected)
 
+=== multi-platform proof: both variants of ph-reqko:0.1.0-multi run locally 
+=== docker run --rm --entrypoint python --platform linux/amd64 ph-reqko:0.1.0-multi -c "import platform; print('PLATFORM=' + platform.machine())" 
+PLATFORM=x86_64
+=== docker run --rm --entrypoint python --platform linux/arm64 ph-reqko:0.1.0-multi -c "import platform; print('PLATFORM=' + platform.machine())" 
+PLATFORM=aarch64
+=== docker images ph-reqko 
+IMAGE                  ID             DISK USAGE   CONTENT SIZE   EXTRA
+ph-reqko:0.1.0         414db569ec97        315MB         78.1MB   U    
+ph-reqko:0.1.0-multi   7e9f8bcd0cd6        677MB          156MB        

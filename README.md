@@ -2,7 +2,7 @@
 
 A DNS server that blocks ad and tracker domains for your devices — a Pi-hole-style DNS filter written in Python.
 
-> **Status:** the resolver core (objective 4) and the statistics storage + REST API (objective 5) are implemented and tested: UDP/TCP DNS forwarding, caching with TTL, blocklist filtering with allowlist priority, CNAME uncloaking, ACL, rate limiting; batched SQLite query-log writer with hourly aggregates and retention; a token-authenticated REST API (`/health`, `/ready`, stats, query log, custom rules, blocklist refresh); a charts-only web panel at `/panel` (canvas, no CDN). The container setup (Dockerfile, compose with Caddy TLS proxy and an optional WireGuard profile) is written and statically tested, but has never been executed — no Docker on the dev machine (see [docs/06-implementation.md](docs/06-implementation.md)). Prometheus metrics are not implemented yet (objective 7).
+> **Status:** the resolver core (objective 4), statistics + REST API (objective 5), the charts-only web panel, and containerization (objective 6, runtime-verified on Docker Desktop) are implemented and tested. Objective 7 adds Prometheus metrics (hand-written exposition, NFR-07), a provisioned Prometheus + Grafana stack in compose, and a GitHub Actions CI workflow (NFR-09 — written and actionlint-validated, but never run on GitHub: pushing is out of scope for now). Objective 8 (performance/security validation) is pending.
 
 ## Goal
 
@@ -25,8 +25,8 @@ Python (`asyncio`), SQLite, REST API, Docker / Docker Compose, Prometheus, Grafa
 - [x] 3. Design the architecture and the database schema
 - [x] 4. Build the resolver with caching and blocklist filtering
 - [x] 5. Add statistics collection and a REST API (incl. the charts-only web panel)
-- [x] 6. Containerize the application and set up secure remote access (runtime verification pending: no Docker on the dev machine)
-- [ ] 7. Set up monitoring (Prometheus, Grafana) and automated tests (CI)
+- [x] 6. Containerize the application and set up secure remote access (runtime-verified on Docker Desktop)
+- [x] 7. Set up monitoring (Prometheus, Grafana) and automated tests (CI written and lint-validated; first GitHub run pending push)
 - [ ] 8. Test performance and security, document limitations and improvements
 
 ## Development
@@ -147,6 +147,12 @@ docker compose ps
   `127.0.0.1`** (`REQKO_DNS_BIND`, `REQKO_HTTPS_BIND`, `REQKO_WG_BIND`) and must be changed
   in `.env` for real remote access — see
   [docs/06-remote-access.md](docs/06-remote-access.md) (threat model and peer setup).
+- **Monitoring (objective 7):** Grafana runs at `http://127.0.0.1:3000` (login `admin`,
+  password = `GRAFANA_ADMIN_PASSWORD` from `.env`) with a provisioned `ph-reqKO overview`
+  dashboard; Prometheus scrapes the resolver internally and is **not** published to the host —
+  raw metrics are visible from inside the compose network at `http://reqko:9100/metrics`, e.g.
+  `docker compose exec reqko python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:9100/metrics').read().decode())"`.
+  See [docs/07-implementation.md](docs/07-implementation.md).
 
 ## Demo
 
@@ -173,6 +179,7 @@ queries arrive.
 - [Goal 5 — Implementation: statistics storage and REST API](docs/05-implementation.md) (in Russian)
 - [Goal 6 — Implementation: containerization and secure remote access](docs/06-implementation.md) (in Russian)
 - [Goal 6 — Remote access guide: threat model, VPN setup](docs/06-remote-access.md) (in Russian)
+- [Goal 7 — Implementation: Prometheus metrics, Grafana, CI](docs/07-implementation.md) (in Russian)
 
 ## License
 
