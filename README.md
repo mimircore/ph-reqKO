@@ -2,7 +2,7 @@
 
 A DNS server that blocks ad and tracker domains for your devices — a Pi-hole-style DNS filter written in Python.
 
-> **Status:** the resolver core (objective 4) and the statistics storage + REST API (objective 5) are implemented and tested: UDP/TCP DNS forwarding, caching with TTL, blocklist filtering with allowlist priority, CNAME uncloaking, ACL, rate limiting; batched SQLite query-log writer with hourly aggregates and retention; a token-authenticated REST API (`/health`, `/ready`, stats, query log, custom rules, blocklist refresh); a charts-only web panel at `/panel` (canvas, no CDN). Prometheus metrics and Docker deployment are not implemented yet (objectives 6–8).
+> **Status:** the resolver core (objective 4) and the statistics storage + REST API (objective 5) are implemented and tested: UDP/TCP DNS forwarding, caching with TTL, blocklist filtering with allowlist priority, CNAME uncloaking, ACL, rate limiting; batched SQLite query-log writer with hourly aggregates and retention; a token-authenticated REST API (`/health`, `/ready`, stats, query log, custom rules, blocklist refresh); a charts-only web panel at `/panel` (canvas, no CDN). The container setup (Dockerfile, compose with Caddy TLS proxy and an optional WireGuard profile) is written and statically tested, but has never been executed — no Docker on the dev machine (see [docs/06-implementation.md](docs/06-implementation.md)). Prometheus metrics are not implemented yet (objective 7).
 
 ## Goal
 
@@ -25,7 +25,7 @@ Python (`asyncio`), SQLite, REST API, Docker / Docker Compose, Prometheus, Grafa
 - [x] 3. Design the architecture and the database schema
 - [x] 4. Build the resolver with caching and blocklist filtering
 - [x] 5. Add statistics collection and a REST API (incl. the charts-only web panel)
-- [ ] 6. Containerize the application and set up secure remote access
+- [x] 6. Containerize the application and set up secure remote access (runtime verification pending: no Docker on the dev machine)
 - [ ] 7. Set up monitoring (Prometheus, Grafana) and automated tests (CI)
 - [ ] 8. Test performance and security, document limitations and improvements
 
@@ -102,6 +102,46 @@ REQKO_ADMIN_TOKEN=changeme-admin-token REQKO_DNS_PORT=5454 REQKO_DNS_HOST=127.0.
 
 The full variable list lives in [docs/03-architecture.md](docs/03-architecture.md) (section 9); the API surface is documented in [docs/05-implementation.md](docs/05-implementation.md).
 
+## Docker quick start
+
+> **Note:** the container setup was written and statically tested, but never executed on the
+> development machine (Docker is not installed there) — runtime behaviour is marked NOT VERIFIED
+> in [docs/06-implementation.md](docs/06-implementation.md).
+
+```powershell
+# 1. Copy the example env and generate tokens (never commit .env)
+Copy-Item .env.example .env
+# PowerShell token generator:
+-join ((48..57) + (97..122) | Get-Random -Count 32 | ForEach-Object {[char]$_})
+# put the result into REQKO_ADMIN_TOKEN and REQKO_READ_TOKEN in .env
+
+# 2. Build and start (DNS on 127.0.0.1:53 -> container 5353, HTTPS on 127.0.0.1:443)
+docker compose up -d
+docker compose ps
+```
+
+```bash
+# 1. Copy the example env and generate tokens (never commit .env)
+cp .env.example .env
+# bash token generator:
+openssl rand -hex 32
+# put the result into REQKO_ADMIN_TOKEN and REQKO_READ_TOKEN in .env
+
+# 2. Build and start
+docker compose up -d
+docker compose ps
+```
+
+- **Panel/API:** open `https://localhost/panel` and accept (or trust) the Caddy internal-CA
+  certificate: the proxy uses `tls internal` so it works fully offline. To install the root CA
+  instead, export it from the proxy container; for a real domain + Let's Encrypt see
+  [docs/06-remote-access.md](docs/06-remote-access.md).
+- **DNS:** point a LAN client at the host's port 53 (default bind is `127.0.0.1` — change
+  `REQKO_DNS_BIND` in `.env` to your LAN IP to serve the network; keep the ACL and rate limit on).
+- **Remote access:** the intended path is the optional WireGuard profile
+  (`docker compose --profile vpn up -d`) — nothing exposed publicly; see
+  [docs/06-remote-access.md](docs/06-remote-access.md) (threat model and peer setup).
+
 ## Demo
 
 One-command demo on Windows PowerShell (uses demo-only tokens, see the script header):
@@ -125,6 +165,8 @@ queries arrive.
 - [Goal 3 — Architecture and Database Design](docs/03-architecture.md) (in Russian)
 - [Goal 4 — Implementation: resolver, filtering, cache, pipeline](docs/04-implementation.md) (in Russian)
 - [Goal 5 — Implementation: statistics storage and REST API](docs/05-implementation.md) (in Russian)
+- [Goal 6 — Implementation: containerization and secure remote access](docs/06-implementation.md) (in Russian)
+- [Goal 6 — Remote access guide: threat model, VPN setup](docs/06-remote-access.md) (in Russian)
 
 ## License
 
