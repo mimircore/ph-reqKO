@@ -2,7 +2,7 @@
 
 A DNS server that blocks ad and tracker domains for your devices — a Pi-hole-style DNS filter written in Python.
 
-> **Status:** the resolver core (objective 4) and the statistics storage + REST API (objective 5) are implemented and tested: UDP/TCP DNS forwarding, caching with TTL, blocklist filtering with allowlist priority, CNAME uncloaking, ACL, rate limiting; batched SQLite query-log writer with hourly aggregates and retention; a token-authenticated REST API (`/health`, `/ready`, stats, query log, custom rules, blocklist refresh). The web panel, Prometheus metrics and Docker deployment are not implemented yet (objectives 5–8).
+> **Status:** the resolver core (objective 4) and the statistics storage + REST API (objective 5) are implemented and tested: UDP/TCP DNS forwarding, caching with TTL, blocklist filtering with allowlist priority, CNAME uncloaking, ACL, rate limiting; batched SQLite query-log writer with hourly aggregates and retention; a token-authenticated REST API (`/health`, `/ready`, stats, query log, custom rules, blocklist refresh); a charts-only web panel at `/panel` (canvas, no CDN). Prometheus metrics and Docker deployment are not implemented yet (objectives 6–8).
 
 ## Goal
 
@@ -24,7 +24,7 @@ Python (`asyncio`), SQLite, REST API, Docker / Docker Compose, Prometheus, Grafa
 - [x] 2. Define functional and non-functional requirements
 - [x] 3. Design the architecture and the database schema
 - [x] 4. Build the resolver with caching and blocklist filtering
-- [x] 5. Add statistics collection and a REST API (web panel pending)
+- [x] 5. Add statistics collection and a REST API (incl. the charts-only web panel)
 - [ ] 6. Containerize the application and set up secure remote access
 - [ ] 7. Set up monitoring (Prometheus, Grafana) and automated tests (CI)
 - [ ] 8. Test performance and security, document limitations and improvements
@@ -55,6 +55,10 @@ $env:REQKO_DB_PATH='C:\path\to\reqko.db'
 
 # Query the API (admin token: read + write; GET /health needs no token)
 curl.exe -s -H "Authorization: Bearer changeme-admin-token" http://127.0.0.1:8080/api/v1/stats/summary
+
+# Open the charts-only web panel (reads a token in the browser, sessionStorage)
+#   http://127.0.0.1:8080/panel
+# Enter the admin or read token when prompted; the panel refreshes every 10 s.
 ```
 
 ### Linux (bash)

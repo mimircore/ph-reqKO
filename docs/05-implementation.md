@@ -19,7 +19,8 @@
 | `filtering/rules` | `src/reqko/filtering/rules.py` | `RuleManager`: пользовательские правила в таблице `custom_rules`, слияние с базовым снимком и атомарная подмена `FilterSnapshot` без перезапуска | FR-19, FR-10 |
 | `api/app` | `src/reqko/api/app.py` | Фабрика aiohttp-приложения: middleware (заголовки безопасности, RFC 7807 ошибки, Bearer-аутентификация), `ApiState` | FR-15..FR-17 |
 | `api/auth` | `src/reqko/api/auth.py` | SHA-256 хеширование токенов, сравнение `hmac.compare_digest`, скоупы read/admin, per-IP лимит неудачных аутентификаций | FR-17 |
-| `api/routes` | `src/reqko/api/routes.py` | Обработчики: `/health`, `/ready`, статистика, журнал запросов, правила, обновление списков | FR-15, FR-16, FR-19 |
+| `api/routes` | `src/reqko/api/routes.py` | Обработчики: `/health`, `/ready`, статистика, журнал запросов, правила, обновление списков; раздача веб-панели `/panel` с фиксированным белым списком файлов | FR-15, FR-16, FR-18, FR-19 |
+| `web/` | `src/reqko/web/` | Статика панели: `index.html`, `panel.js`, `panel.css` — только разметка и код, без данных; графики рисуются на `<canvas>` своими силами (без CDN и внешних запросов) | FR-18 |
 | `dns/upstream` | `src/reqko/dns/upstream.py` | + `probe_upstream()`: лёгкий UDP-зонд (запрос NS корня) для `/health` | FR-16 |
 | `config` | `src/reqko/config.py` | Новые переменные: `REQKO_API_HOST/PORT`, `REQKO_ADMIN_TOKEN`, `REQKO_READ_TOKEN`, `REQKO_LOG_CLIENT_IP`, `REQKO_LOG_BATCH_SIZE`, `REQKO_LOG_FLUSH_INTERVAL`, `REQKO_AUTH_FAILURE_LIMIT/WINDOW`, `REQKO_BLOCKLIST_URLS`, `REQKO_LOG_RETENTION_DAYS` (по умолчанию 7) | NFR-08 |
 | `__main__` | `src/reqko/__main__.py` | Запуск DNS-серверов и REST API в одном event loop; bootstrap токена; writer, retention; корректная остановка с финальным flush | FR-15..FR-17 |
@@ -98,6 +99,7 @@ process_query() ──put_nowait──▶ asyncio.Queue(maxsize=10000) ──▶
 | `tests/unit/test_auth.py` | SHA-256 хеш, скоупы (admin/read/нет), read-токен не получает admin, limiter: блокировка после N, окно, per-IP | FR-17 |
 | `tests/unit/test_config.py` | + новые переменные, legacy-алиасы (`REQKO_API_KEY`, `REQKO_HTTP_*`), `REQKO_ANONYMIZE_IPS` → `anonymized`, валидация | NFR-08 |
 | `tests/integration/test_api.py` | Все эндпоинты: health/ready (публичные, 503), 401/403/429, скоупы, пагинация и её пределы, фильтры, SQL-инъекция как связанный параметр (таблица цела), невалидный ввод → 400 problem+json, CRUD правил с нормализацией, `/ready` после загрузки правил, обновление списков 202/409/400, интеграция: allowlist меняет следующий DNS-ответ | FR-15..FR-19 |
+| `tests/integration/test_web.py` | Панель: `/panel` и ассеты с правильными content-type и CSP; неизвестный ассет → 404; попытки path traversal → 404; API по-прежнему требует токен и хранит свой строгий CSP; в HTML нет инлайновых скриптов; whitelist соответствует файлам в пакете | FR-18 |
 
 ### 5.2 Результат запуска
 
@@ -108,31 +110,31 @@ process_query() ──put_nowait──▶ asyncio.Queue(maxsize=10000) ──▶
 All checks passed!
 
 > .venv\Scripts\python.exe -m mypy src tests
-Success: no issues found in 42 source files
+Success: no issues found in 43 source files
 
 > .venv\Scripts\python.exe -m pytest
-........................................................................ [ 48%]
-........................................................................ [ 97%]
-....                                                                     [100%]
-148 passed in 7.24s
+........................................................................ [ 47%]
+........................................................................ [ 94%]
+.........                                                                [100%]
+153 passed in 7.85s
 ```
 
 ### 5.3 Покрытие кода
 
 ```
-> .venv\Scripts\python.exe -m pytest --cov=reqko --cov-report=term-missing -q
-........................................................................ [ 48%]
-........................................................................ [ 97%]
-....                                                                     [100%]
+> .venv\Scripts\python.exe -m pytest --cov=reqko --cov-report=term-missing
+........................................................................ [ 47%]
+........................................................................ [ 94%]
+.........                                                                [100%]
 
 Name                              Stmts   Miss  Cover   Missing
 ---------------------------------------------------------------
 src\reqko\__init__.py                 1      0   100%
 src\reqko\__main__.py               126    126     0%   3-272
 src\reqko\api\__init__.py             0      0   100%
-src\reqko\api\app.py                 94      0   100%
+src\reqko\api\app.py                 96      0   100%
 src\reqko\api\auth.py                47      0   100%
-src\reqko\api\routes.py             286      9    97%   99-100, 116, 118, 137-138, 467, 484, 505
+src\reqko\api\routes.py             308     11    96%   110-111, 127, 129, 148-149, 478, 495, 516, 531-532
 src\reqko\config.py                 170     10    94%   162-164, 192, 313, 319, 326-327, 330, 340
 src\reqko\dns\__init__.py             2      0   100%
 src\reqko\dns\acl.py                 15      0   100%
@@ -141,7 +143,7 @@ src\reqko\dns\pipeline.py           150     11    93%   87-88, 104-105, 180-182,
 src\reqko\dns\protocol.py           304     35    88%   142, 183, 196, 208-210, 220, 222-224, 226-227, 229-241, 245-247, 328, 335, 343, 352, 363, 371-372, 377, 395, 409, 413, 423, 428, 436
 src\reqko\dns\ratelimit.py           37      2    95%   37, 48
 src\reqko\dns\server.py              73     12    84%   37-38, 41, 64, 68-69, 76, 81-82, 123-126
-src\reqko\dns\upstream.py            97     14    86%   58, 94-95, 110, 140-149, 158, 166-170, 196, 205
+src\reqko\dns\upstream.py            97     13    87%   58, 94-95, 110, 140-149, 158, 166-170, 196
 src\reqko\filtering\__init__.py       3      0   100%
 src\reqko\filtering\engine.py        56      0   100%
 src\reqko\filtering\parser.py        98     10    90%   52-55, 88, 123, 133, 142, 171, 184
@@ -153,10 +155,10 @@ src\reqko\storage\retention.py       34      2    94%   55-56
 src\reqko\storage\settings.py         9      0   100%
 src\reqko\storage\writer.py         107      6    94%   189, 192-193, 217-219
 ---------------------------------------------------------------
-TOTAL                              1991    254    87%
+TOTAL                              2015    255    87%
 ```
 
-Покрытие нового кода Цели 5: `api/app` 100%, `api/auth` 100%, `api/routes` 97%, `filtering/rules` 99%, `storage/writer` 94%, `storage/retention` 94%, `storage/settings` 100% — все выше порога 85%. `__main__.py` не покрыт автотестами (точка входа проверяется демо-запуском, раздел 6).
+Покрытие нового кода Цели 5: `api/app` 100%, `api/auth` 100%, `api/routes` 96%, `filtering/rules` 99%, `storage/writer` 94%, `storage/retention` 94%, `storage/settings` 100% — все выше порога 85%. `__main__.py` не покрыт автотестами (точка входа проверяется демо-запуском, раздел 6).
 
 ---
 
@@ -185,6 +187,8 @@ TOTAL                              1991    254    87%
 ```json
 {"status": "ok", "uptime_seconds": 18.641, "database": {"reachable": true}, "upstream": {"reachable": true}, "blocklist": {"domains": 3, "version": 2, "last_update": "2026-11-04 16:19:07"}, "queue": {"depth": 0, "dropped_events": 0}}
 ```
+
+Примечание: `last_update` в `/health` (как и все метки времени в БД) хранится в UTC, тогда как временные метки в журнале консоли процесса — локальное время машины разработки (UTC+2); в приведённом выше журнале старта сервера часы на 2 часа впереди значения `last_update` для одного и того же момента.
 
 **`GET /api/v1/stats/summary` (Bearer admin):**
 
@@ -242,11 +246,44 @@ DELETE правила → снова 0.0.0.0
 
 ---
 
-## 7. Ограничения текущей реализации
+## 7. Веб-панель (FR-18)
+
+Минималистичная панель **только с графиками** доступна по адресу `http://<api-host>:<api-port>/panel` (публичная статика, без токена в URL). Управления (DHCP, routing, списки) в ней нет — только просмотр.
+
+### 7.1 Что показывает панель
+
+- Плитки-сводки: всего запросов, % блокировок, % попаданий в кеш, средняя задержка — из `GET /api/v1/stats/summary`;
+- линейный график «total vs blocked» из `GET /api/v1/stats/timeseries` с переключателем **Hour / Day**;
+- столбчатая диаграмма топ заблокированных доменов (`/api/v1/stats/top-domains?status=blocked`);
+- столбчатая диаграмма топ клиентов (`/api/v1/stats/top-clients`);
+- автообновление каждые 10 секунд, понятные состояния ошибки (401 → повторный ввод токена, сетевая ошибка → сообщение `Network error`).
+
+Графики рисуются на `<canvas>` собственным кодом (`panel.js`): без Chart.js, без CDN, без внешних запросов — панель работает в изолированной сети (offline).
+
+### 7.2 Безопасность
+
+| Решение | Пояснение |
+|---|---|
+| Токен запрашивается формой при первом открытии | Хранится только в `sessionStorage` (очищается при закрытии вкладки); при 401 удаляется и запрашивается снова. Достаточно скоупа `read`. |
+| Данные не попадают в HTML | Статика (`index.html`, `panel.js`, `panel.css`) не содержит никаких данных; все значения из API вставляются в DOM только через `textContent`/`createTextNode` — `innerHTML` с данными не используется, XSS через ответы API исключён. |
+| CSP только для панели | Обработчик `/panel` и ассетов ставит `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'`; API-ответы сохраняют свой строгий `default-src 'none'; frame-ancestors 'none'` (middleware ставит заголовок через `setdefault` и не перетирает CSP панели). Инлайновых скриптов в HTML нет — тест проверяет, что каждый `<script>` имеет `src=`. |
+| Раздача статики без traversal | Только фиксированный белый список имён (`index.html`, `panel.js`, `panel.css`); любой другой путь — 404. Файлы включены в пакет как package-data (`[tool.setuptools.package-data]`). |
+| Публичность | `/panel` помечен публичным префиксом в auth-middleware (как `/health`, `/ready`): в статике нет секретов, а данные панель получает с токеном пользователя. |
+
+### 7.3 Демо-скриншот
+
+Панель открыта во встроенном браузере (Chromium, тёмная тема), после 22 DNS-запросов из раздела 6:
+
+![Веб-панель ph-reqKO: плитки, график total/blocked, топ доменов и клиентов](img/panel.png)
+
+Файл скриншота: `docs/img/panel.png` (реальный снимок работающей панели; видны плитки 22 / 45.45% / 27.27% / 0.573 ms, точка данных 16:00:00 на графике, топ заблокированных доменов и клиент 127.0.0.1).
+
+---
+
+## 8. Ограничения текущей реализации
 
 | Ограничение | Причина | Цель устранения |
 |------------|---------|----------------|
-| Нет веб-панели с графиками (FR-18) — API готов отдавать данные | Scope панели не входит в задачу Цели 5 | Цель 5/6 |
 | Нет экспорта метрик Prometheus | Scope Цели 7 | Цель 7 |
 | Токены не управляются через API (создание/ротация read-токенов — только env) | Минимальный скоуп аутентификации | Цель 6/7 |
 | `/stats/summary` считает по `query_log`, а не по `stats_hourly` (после ротации итоги за удалённый период исчезают) | Точность важнее скорости на текущих объёмах; `timeseries` уже строится по агрегатам | Цель 7 |
@@ -256,7 +293,7 @@ DELETE правила → снова 0.0.0.0
 
 ---
 
-## 8. Соответствие требованиям (таблица трассировки)
+## 9. Соответствие требованиям (таблица трассировки)
 
 | ID | Требование | Статус | Модуль |
 |----|-----------|--------|--------|
@@ -268,7 +305,7 @@ DELETE правила → снова 0.0.0.0
 | FR-15 | REST API управления и статистики | ✅ (без управления списками-источниками CRUD; refresh и custom rules реализованы) | `api/routes` |
 | FR-16 | Health/Ready эндпоинты | ✅ (`/health`, `/ready`, публичные, 200/503) | `api/routes` |
 | FR-17 | Аутентификация REST API (X-API-Key/Bearer) | ✅ (Bearer + SHA-256; генерация при первом старте вместо отказа запуска — допустимая альтернатива из FR-17) | `api/auth`, `api/app`, `__main__` |
-| FR-18 | Веб-панель с графиками | ❌ NOT IMPLEMENTED | — |
+| FR-18 | Веб-панель с графиками | ✅ (`/panel` — плитки, линейный график total/blocked, топ доменов и клиентов; canvas без CDN, токен в sessionStorage, CSP только для панели) | `api/routes` (раздача), `web/` |
 | FR-19 | Ручные пользовательские правила | ✅ (API; применение без перезапуска) | `filtering/rules`, `api/routes` |
 | NFR-01/02 | Задержка p95, RAM | ❌ NOT IMPLEMENTED (не замерялись) | Цель 8 |
 | NFR-03 | Изоляция сбоев: очередь с отбрасыванием, БД вне горячего пути | ✅ | `storage/writer`, `dns/pipeline` |
