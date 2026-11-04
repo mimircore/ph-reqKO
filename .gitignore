@@ -221,6 +221,9 @@ __marimo__/
 
 # Project
 *.db
+*.db-shm
+*.db-wal
+blocklist.txt
 *.sqlite3
 .idea/
 .vscode/
