@@ -118,7 +118,7 @@ flowchart LR
 | Запись в read-only ФС | ✅ RUN | `touch /app/should-fail.txt` → `Read-only file system`; запись в tmpfs `/tmp` работает |
 | `down` → `up`: персистентность тома | ✅ RUN | статистика сохранилась: до `total=10 blocked=6`, после `total=10 blocked=6`; блоклист перечитан из тома |
 | Trivy `image --severity HIGH,CRITICAL` | ✅ RUN | первая сборка: **108 (97 HIGH, 11 CRITICAL)**; после `apt-get upgrade` + удаления setuptools/wheel: **41 (39 HIGH, 2 CRITICAL)** — все оставшиеся = Debian bookworm CVEs без исправленных версий (upstream) |
-| Мультиархитектурность `buildx --platform amd64,arm64` | ✅ RUN | manifest list собран и загружен (`--load`); arm64-вариант собран под QEMU; запускаемость обеих платформ подтверждена запусками образа (`PLATFORM=x86_64` и `PLATFORM=aarch64`), полный запуск сервера на arm64 — в журнале проверки |
+| Мультиархитектурность `buildx --platform amd64,arm64` | ✅ RUN | manifest list собран и загружен (`--load`); arm64-вариант собран под QEMU; запускаемость обеих платформ подтверждена запусками образа (`PLATFORM=x86_64`, `PLATFORM=aarch64` — [docs/evidence/06-runtime.txt](evidence/06-runtime.txt)); полный запуск сервера на arm64 — в том же журнале |
 | Профиль `vpn` | ⚠️ PARTIAL | контейнер `wireguard` стартует и слушает `127.0.0.1:51820->51820/udp` (bind по умолчанию изменён на localhost); журнал показывает ожидаемое «No valid tunnel config found» — **реальный VPN-хендшейк НЕ ПРОВЕРЕН (нет второго WireGuard-эндпоинта)** |
 | hadolint | ❌ NOT RUN | не установлен |
 | Валидация Mermaid (`mmdc`) | ❌ NOT RUN | mmdc/npx не установлены |
