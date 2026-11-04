@@ -102,6 +102,22 @@ REQKO_ADMIN_TOKEN=changeme-admin-token REQKO_DNS_PORT=5454 REQKO_DNS_HOST=127.0.
 
 The full variable list lives in [docs/03-architecture.md](docs/03-architecture.md) (section 9); the API surface is documented in [docs/05-implementation.md](docs/05-implementation.md).
 
+## Demo
+
+One-command demo on Windows PowerShell (uses demo-only tokens, see the script header):
+
+```powershell
+# Terminal 1: create the demo blocklist (if missing), start DNS on 5454 + API on 8080
+powershell -ExecutionPolicy Bypass -File scripts\run_demo.ps1
+
+# Terminal 2: send the demo query list and see per-query results + a summary
+.\.venv\Scripts\python.exe scripts\send_queries.py
+```
+
+Then open **http://127.0.0.1:8080/panel** and enter the read token printed by the
+launcher (`read-secret-456`). The panel tiles, charts and top lists fill in as
+queries arrive.
+
 ## Documentation
 
 - [Goal 1 — Research: DNS, Pi-hole, AdGuard Home](docs/01-research.md) (in Russian)
