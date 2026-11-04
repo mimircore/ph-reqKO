@@ -224,3 +224,4 @@ __marimo__/
 *.sqlite3
 .idea/
 .vscode/
+.vs/
