@@ -4,7 +4,7 @@
 
 Данный документ описывает контейнеризацию ph-reqKO (образ, docker-compose, reverse proxy, профиль VPN) в рамках Цели 6. Основание: [docs/02-requirements.md](02-requirements.md) (NFR-04, NFR-06, NFR-08, FR-16/17) и [docs/03-architecture.md](03-architecture.md) (разделы 8 и 11). Приложение (Цели 4–5) не менялось: контейнер запускает тот же код.
 
-> **Обновление:** первоначально Docker на машине отсутствовал и всё runtime-поведение было помечено NOT VERIFIED. Позднее Docker Desktop был установлен, и все проверки этого документа **выполнены реально** (статусы в разделах 5 и 6 — фактические результаты). Исключения честно помечены: реальный VPN-хендшейк (нужен второй WireGuard-эндпоинт), Trivy-оставшие базовые CVE Debian (нет исправлений в bookworm), валидация Mermaid через `mmdc`.
+> **Обновление:** первоначально Docker на машине отсутствовал и всё runtime-поведение было помечено NOT VERIFIED. Позднее Docker Desktop был установлен, и все проверки этого документа **выполнены реально** (статусы в разделах 5 и 6 — фактические результаты). Исключения честно помечены: реальный VPN-хендшейк (нужен второй WireGuard-эндпоинт), оставшиеся после Trivy-сканирования базовые CVE Debian (нет исправлений в bookworm), валидация Mermaid через `mmdc`.
 
 ## 2. Проверка окружения (реальный вывод)
 
@@ -38,8 +38,8 @@ Server Version: 29.9.2
 | `Dockerfile` | Многоступенчатая сборка: builder собирает wheel (`pip wheel --no-deps`), runtime ставит только wheel (+ security-upgrade базовых пакетов, удаление setuptools/wheel); base `python:3.11.9-slim` (зафиксирован минорный тег); non-root UID/GID 10001; `VOLUME /data`; `EXPOSE 53/tcp 53/udp 8080/tcp`; `HEALTHCHECK` на python (без curl); OCI-метки; `ENTRYPOINT ["python","-m","reqko"]` | NFR-04, NFR-06 |
 | `docker/caddy/Dockerfile` | Сборка поверх `caddy:2.8.4` с `setcap -r` на бинарнике — иначе `cap_drop: ALL` ломает `execve` (file capability) | NFR-04 |
 | `.dockerignore` | Исключает `.env` (секреты не попадают в образ), `.git`, `.venv`, тесты, документацию, локальные БД | NFR-04 |
-| `docker-compose.yml` | Сервисы `reqko`, `proxy` (Caddy), `wireguard` (профиль `vpn`); сети `backend` (internal) + `upstream` (egress); том `reqko-data`; лимиты ресурсов | NFR-08 |
-| `docker/Caddyfile` | TLS-терминация (`tls internal`, офлайн), HSTS/no-sniff/frame-deny/no-referrer, лимит тела 1 МБ, проксирование на `reqko:8080` | FR-16, FR-17 |
+| `docker-compose.yml` | Сервисы `reqko`, `proxy` (Caddy), `wireguard` (профиль `vpn`); сети `backend` (internal, ipam 172.28.0.0/24) + `upstream` (egress) + `edge` (не internal — только для публикации 443 и 51820/udp); том `reqko-data`; лимиты ресурсов | NFR-08 |
+| `docker/Caddyfile` | TLS-терминация (`tls internal`, офлайн), HSTS/no-sniff/frame-deny/no-referrer, лимит тела 1 МБ, проксирование на `reqko:8080`; сайт слушает непривилегированный **8443** внутри контейнера, compose публикует host 443 → 8443 | FR-16, FR-17 |
 | `.env.example` | Шаблон конфигурации с генераторами токенов; реальный `.env` в `.gitignore` и `.dockerignore` | FR-17 |
 | `tests/unit/test_deployment.py` | 24 статических теста: read_only, cap_drop ALL, no-new-privileges, лимиты, API-порт не опубликован, DNS bind по умолчанию 127.0.0.1 → 53 + sysctl без-root, edge-сеть для публикуемых портов, фиксированный IP reqko (172.28.0.10), `:?` для токенов, internal-сеть, wireguard только в профиле vpn, отсутствие `:latest`, non-root USER, HEALTHCHECK без curl, OCI-метки, Caddy-заголовки и снятие file capability, перекрёстная проверка REQKO_* переменных | NFR-04, NFR-08 |
 
@@ -49,7 +49,7 @@ Server Version: 29.9.2
 flowchart LR
     subgraph Host["Хост (порты публикует compose)"]
         H53["53/udp+tcp → 53<br/>(REQKO_DNS_BIND, по умолчанию 127.0.0.1)"]
-        H443["443/tcp → 443<br/>(REQKO_HTTPS_BIND, по умолчанию 127.0.0.1)"]
+        H443["443/tcp → 8443<br/>(REQKO_HTTPS_BIND, по умолчанию 127.0.0.1)"]
         H51820["51820/udp (только профиль vpn)"]
     end
 
@@ -83,7 +83,7 @@ flowchart LR
 
 *Диаграмма не валидировалась `mmdc` (инструмент отсутствует на машине); синтаксис соответствует спецификации Mermaid flowchart.*
 
-Ключевые решения: сеть `backend` объявлена `internal: true` (изоляция proxy↔reqko, у reqko фиксированный адрес **172.28.0.10** — его используют VPN-клиенты как DNS), но у `reqko` есть **вторая** сеть `upstream` с выходом наружу — без неё резолвер не смог бы опрашивать upstream DNS (9.9.9.9) и загружать списки по HTTPS. Публикуемые порты (443, 51820/udp) вынесены на отдельную не-internal сеть `edge`, т.к. порты не публикуются с internal-сетей. У `proxy` и `wireguard` выхода в интернет нет.
+Ключевые решения: сеть `backend` объявлена `internal: true` (изоляция proxy↔reqko, у reqko фиксированный адрес **172.28.0.10** — его используют VPN-клиенты как DNS), но у `reqko` есть **вторая** сеть `upstream` с выходом наружу — без неё резолвер не смог бы опрашивать upstream DNS (9.9.9.9) и загружать списки по HTTPS. Публикуемые порты (443, 51820/udp) вынесены на отдельную не-internal сеть `edge`, т.к. порты не публикуются с internal-сетей. Сетевой статус `proxy` и `wireguard`: они подключены к `backend` (internal) **и** к `edge` (не internal) — то есть имеют исходящий доступ через `edge`; это неизбежное следствие публикации портов, компенсируется их ограничениями (read_only, cap_drop ALL, отсутствие публикуемого API).
 
 ## 5. Решения безопасности
 
@@ -103,7 +103,7 @@ flowchart LR
 
 ## 6. Статус проверки (реальные результаты)
 
-Все команды выполнены фактически на машине разработки (Docker Desktop 29.9.2, WSL2). Выводы сокращены до сути, без имитаций; полные листинги — в истории проверки этого документа/коммитов.
+Все команды выполнены фактически на машине разработки (Docker Desktop 29.9.2, WSL2). Выводы сокращены до сути, без имитаций; полные листинги команд и их выводов — в [docs/evidence/06-runtime.txt](evidence/06-runtime.txt).
 
 | Проверка | Статус | Реальный результат |
 |---|---|---|
@@ -118,7 +118,7 @@ flowchart LR
 | Запись в read-only ФС | ✅ RUN | `touch /app/should-fail.txt` → `Read-only file system`; запись в tmpfs `/tmp` работает |
 | `down` → `up`: персистентность тома | ✅ RUN | статистика сохранилась: до `total=10 blocked=6`, после `total=10 blocked=6`; блоклист перечитан из тома |
 | Trivy `image --severity HIGH,CRITICAL` | ✅ RUN | первая сборка: **108 (97 HIGH, 11 CRITICAL)**; после `apt-get upgrade` + удаления setuptools/wheel: **41 (39 HIGH, 2 CRITICAL)** — все оставшиеся = Debian bookworm CVEs без исправленных версий (upstream) |
-| Мультиархитектурность `buildx --platform amd64,arm64` | ✅ RUN | manifest list собран и загружен (`--load`); arm64-вариант собран под QEMU; `docker run --platform linux/arm64` проверен отдельно (см. ниже) |
+| Мультиархитектурность `buildx --platform amd64,arm64` | ✅ RUN | manifest list собран и загружен (`--load`); arm64-вариант собран под QEMU; запускаемость обеих платформ подтверждена запусками образа (`PLATFORM=x86_64` и `PLATFORM=aarch64`), полный запуск сервера на arm64 — в журнале проверки |
 | Профиль `vpn` | ⚠️ PARTIAL | контейнер `wireguard` стартует и слушает `127.0.0.1:51820->51820/udp` (bind по умолчанию изменён на localhost); журнал показывает ожидаемое «No valid tunnel config found» — **реальный VPN-хендшейк НЕ ПРОВЕРЕН (нет второго WireGuard-эндпоинта)** |
 | hadolint | ❌ NOT RUN | не установлен |
 | Валидация Mermaid (`mmdc`) | ❌ NOT RUN | mmdc/npx не установлены |
@@ -140,7 +140,7 @@ flowchart LR
 | ID | Требование | Статус | Модуль |
 |----|-----------|--------|--------|
 | FR-01..FR-19 | Резолвер, статистика, API, панель | ✅ (Цели 4–5) | `dns/*`, `storage/*`, `api/*`, `web/*` |
-| NFR-04 | Безопасность контура (non-root, caps, read-only, ACL, защита API) | ✅ RUNTIME VERIFIED — `uid=10001`, cap_drop ALL работает (найден и исправлен баг file-capability caddy), read-only ФС подтверждена, 8080 изолирован, Trivy-скан выполнен с реальными числами и митигацией | `Dockerfile`, `docker-compose.yml` |
+| NFR-04 | Безопасность контура (non-root, caps, read-only, ACL, защита API) | ⚠️ RUNTIME VERIFIED with residual risk (41 base-image CVEs without upstream fix) — `uid=10001`, cap_drop ALL работает (найден и исправлен баг file-capability caddy), read-only ФС подтверждена, 8080 изолирован; Trivy-скан выполнен: 41 (39 HIGH/2 CRIT) остаётся из-за отсутствия исправлений в Debian bookworm | `Dockerfile`, `docker-compose.yml` |
 | NFR-06 | Мультиплатформенность amd64/arm64 без C-расширений | ✅ BUILD VERIFIED — `buildx --platform linux/amd64,linux/arm64` собрал manifest list; arm64-образ запущен под QEMU (сервер стартовал, healthcheck прошёл); железо ARM — не тестировалось | `Dockerfile` |
 | NFR-08 | Развёртывание `docker compose up -d` + защищённый удалённый доступ | ✅ RUNTIME VERIFIED — стек поднимается, DNS/HTTPS публикуются на localhost, статистика переживает down/up; VPN-профиль стартует (хендшейк с реальным клиентом не проверен) | `docker-compose.yml`, `docker/`, `docs/06-remote-access.md` |
 | FR-16 | Health/ready через прокси | ✅ RUNTIME — `curl -k https://localhost/health` → 200; HEALTHCHECK прошёл в контейнере (amd64 и arm64) | `docker/Caddyfile`, `Dockerfile` |
@@ -154,6 +154,8 @@ flowchart LR
 | Внутренний CA Caddy требует ручного доверия в браузере | TLS internal офлайн по условиям задачи | Установить корневой сертификат Caddy или перейти на Let's Encrypt (docs/06-remote-access.md, раздел 3.4) |
 | VPN-хендшейк с реальным клиентом не проверен | Нет второго WireGuard-эндпоинта на машине разработки | Проверить на стенде: `docker compose --profile vpn up -d`, создать `wg0.conf`, подключить клиента, `wg show` |
 | Первый старт с пустым томом даёт 0 правил (blocklist absent) | `REQKO_BLOCKLIST_FILES=/data/blocklist.txt` ссылается на файл в томе, который создаётся отдельно | Задокументировано в README (создать файл в томе + `POST /api/v1/blocklists/update`); FR-10 fallback работает штатно |
+| У `proxy` нет healthcheck | В образе caddy нет утилит для проверки (только сам бинарник); `docker compose ps` показывает только Up без health-статуса | Можно добавить HEALTHCHECK на `caddy` binary (`caddy adapt`/проверка порта) при необходимости |
 | Rate limiting на прокси отсутствует | В штатном Caddy нет такого модуля (только кастомные сборки) | Остаётся на уровне приложения (per-IP auth limiter); при необходимости — Caddy с модулем `caddy-ratelimit` |
+| `apt-get upgrade` при сборке снижает воспроизводимость образа | Обновления Debian-пакетов привязаны к моменту сборки, а не к версии base-образа | Компромисс ради актуальных security-патчей (Trivy 108→41); при необходимости зафиксировать отдельный слой с пакетами или отказаться от upgrade |
 | Внутренний CA Caddy хранится в tmpfs и пересоздаётся при рестарте | `read_only` + tmpfs без тома | При необходимости вынести `/data/caddy` из tmpfs в именованный том |
 | Метрики Prometheus по-прежнему нет | Цель 7 | Цель 7 |

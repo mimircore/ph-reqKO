@@ -142,9 +142,11 @@ docker compose ps
   `docker compose exec reqko sh -c "printf 'ads.example.com\ndoubleclick.net\n' > /data/blocklist.txt"`
   then `POST https://localhost/api/v1/blocklists/update` with the admin token (or restart).
 - **Remote access:** the intended path is the optional WireGuard profile
-  (`docker compose --profile vpn up -d`; listens on `127.0.0.1:51820/udp` by default) —
-  nothing exposed publicly; VPN clients use `172.28.0.10:53` (fixed address) as their DNS —
-  see [docs/06-remote-access.md](docs/06-remote-access.md) (threat model and peer setup).
+  (`docker compose --profile vpn up -d`) — nothing exposed publicly; VPN clients use
+  `172.28.0.10:53` (fixed address) as their DNS. **All three bind variables default to
+  `127.0.0.1`** (`REQKO_DNS_BIND`, `REQKO_HTTPS_BIND`, `REQKO_WG_BIND`) and must be changed
+  in `.env` for real remote access — see
+  [docs/06-remote-access.md](docs/06-remote-access.md) (threat model and peer setup).
 
 ## Demo
 
