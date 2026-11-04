@@ -24,6 +24,10 @@ TYPE_MX = 15
 TYPE_TXT = 16
 TYPE_AAAA = 28
 TYPE_ANY = 255
+TYPE_OPT = 41  # EDNS0 pseudo-RR (RFC 6891)
+
+# EDNS0 (RFC 6891) constants
+EDNS_PAYLOAD_SIZE = 1232  # DNS FLAG Day 2020 recommended buffer size
 
 # DNS Response Codes (RCODE)
 RCODE_NOERROR = 0
@@ -153,11 +157,12 @@ def append_domain_name(
     buffer: bytearray, name: str, compression_map: dict[str, int]
 ) -> None:
     """Appends an RFC 1035 encoded domain name to buffer with compression pointer tracking."""
-    if not name:
+    norm_name = name.strip(".").lower()
+    if not norm_name:
+        # Root name ("." or "") encodes as a single zero-length label
         buffer.append(0)
         return
 
-    norm_name = name.strip(".").lower()
     labels = norm_name.split(".")
 
     for i in range(len(labels)):
@@ -456,13 +461,40 @@ def parse_wire(data: bytes) -> DNSPacket:
     return packet
 
 
+def find_request_opt(request: DNSPacket) -> DNSRecord | None:
+    """Returns the EDNS0 OPT pseudo-record from the request additionals, if any (RFC 6891)."""
+    for rr in request.additionals:
+        if rr.rtype == TYPE_OPT:
+            return rr
+    return None
+
+
+def make_opt_record(do_flag: bool = False) -> DNSRecord:
+    """Builds a fresh EDNS0 OPT pseudo-record (RFC 6891).
+
+    The TTL field carries the extended RCODE (8 bits), version (8 bits),
+    the DO bit and Z flags; the class field carries the responder payload size.
+    """
+    return DNSRecord(
+        name=".",
+        rtype=TYPE_OPT,
+        rclass=EDNS_PAYLOAD_SIZE,
+        ttl=(1 << 15) if do_flag else 0,
+        rdata=b"",
+    )
+
+
 def make_response(
     request: DNSPacket,
     rcode: int = RCODE_NOERROR,
     aa: bool = False,
     ra: bool = True,
 ) -> DNSPacket:
-    """Creates a response packet copying question and transaction ID from request."""
+    """Creates a response packet copying question and transaction ID from request.
+
+    EDNS consistency: the response carries a fresh OPT record if and only if
+    the client request contained one (STEP 2c / RFC 6891).
+    """
     header = DNSHeader(
         id=request.header.id,
         qr=1,
@@ -475,10 +507,15 @@ def make_response(
         rcode=rcode,
         qdcount=len(request.questions),
     )
-    return DNSPacket(
+    resp = DNSPacket(
         header=header,
         questions=list(request.questions),
     )
+    client_opt = find_request_opt(request)
+    if client_opt is not None:
+        do_flag = bool(client_opt.ttl & 0x8000)
+        resp.additionals.append(make_opt_record(do_flag=do_flag))
+    return resp
 
 
 def make_blocking_response(

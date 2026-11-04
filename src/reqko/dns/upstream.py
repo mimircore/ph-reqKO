@@ -34,7 +34,7 @@ async def _send_udp_query(
     timeout: float,
 ) -> bytes:
     """Sends a DNS query over UDP and returns raw response bytes."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     # Create ephemeral socket for each query
     transport: asyncio.DatagramTransport | None = None
@@ -95,10 +95,11 @@ async def query_upstream(
     request: DNSPacket,
     upstreams: Sequence[tuple[str, int]],
     timeout: float = 2.0,
-) -> DNSPacket:
+) -> tuple[DNSPacket, str]:
     """Queries upstream DNS servers with UDP + TC=1 TCP fallback.
 
-    Tries each upstream in order. Returns first successful response.
+    Tries each upstream in order. Returns the first successful response
+    together with the "host:port" of the server that actually answered it.
     Raises UpstreamError if all fail.
     """
     if not request.questions:
@@ -151,15 +152,23 @@ async def query_upstream(
                     response = parse_wire(raw_tcp)
                     if response.header.id != request.header.id:
                         continue
+                    if response.questions and request.questions:
+                        req_q = request.questions[0]
+                        resp_q = response.questions[0]
+                        if (
+                            req_q.name.lower() != resp_q.name.lower()
+                            or req_q.qtype != resp_q.qtype
+                        ):
+                            continue
                 except Exception as e:
-                    logger.warning("TCP fallback to %s:%d failed: %s", host, port, e)
+                    logger.warning("TCP fallback to %s:%d failed: %s", host, port, type(e).__name__)
                     last_exc = e if isinstance(e, Exception) else OSError(str(e))
                     continue
 
-            return response
+            return response, f"{host}:{port}"
 
         except Exception as e:
-            logger.warning("Upstream %s:%d failed: %s", host, port, e)
+            logger.warning("Upstream %s:%d failed: %s: %s", host, port, type(e).__name__, e)
             last_exc = e
 
     raise UpstreamError(f"All upstreams failed: {last_exc}") from last_exc

@@ -6,7 +6,6 @@ Supports atomic snapshot swapping and lock-free concurrency.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import NamedTuple
 
 from reqko.filtering.parser import ParsedFilterRules
@@ -67,11 +66,8 @@ class FilterSnapshot:
         )
 
 
-@dataclass
 class FilterEngine:
     """Thread-safe and async-safe filtering engine with atomic snapshot swap."""
-
-    _snapshot: FilterSnapshot
 
     def __init__(self, snapshot: FilterSnapshot | None = None) -> None:
         if snapshot is None:

@@ -2,7 +2,7 @@
 
 Pipeline order (per docs/03-architecture.md section 3):
   ACL -> Rate Limit -> Wire Parse (FORMERR) -> ANY Check ->
-  Allowlist -> Blocklist -> Cache Lookup -> Cache-hit re-validation ->
+  Allowlist/Blocklist -> Cache Lookup -> Cache-hit re-validation ->
   Upstream -> CNAME Uncloaking -> Cache Store -> Response -> Async Log
 """
 
@@ -10,18 +10,25 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import struct
 import time
 from dataclasses import dataclass
 
 from reqko.dns.acl import ClientACL
 from reqko.dns.cache import DNSCache
 from reqko.dns.protocol import (
+    INT_TO_TYPE_NAME,
     RCODE_FORMERR,
     RCODE_REFUSED,
     TYPE_ANY,
+    TYPE_CNAME,
+    TYPE_OPT,
     DNSFormatError,
+    DNSHeader,
     DNSPacket,
+    find_request_opt,
     make_blocking_response,
+    make_opt_record,
     make_response,
     parse_wire,
 )
@@ -65,9 +72,50 @@ class PipelineConfig:
 
 
 def _qtype_name(qtype: int) -> str:
-    from reqko.dns.protocol import INT_TO_TYPE_NAME
-
     return INT_TO_TYPE_NAME.get(qtype, str(qtype))
+
+
+def _make_early_response(raw_data: bytes, rcode: int) -> DNSPacket:
+    """Builds a minimal REFUSED/FORMERR response keeping the client packet ID.
+
+    Used while the packet cannot be parsed yet (ACL, rate limit, wire errors).
+    """
+    pkt_id = 0
+    if len(raw_data) >= 2:
+        try:
+            (pkt_id,) = struct.unpack_from("!H", raw_data, 0)
+        except struct.error:
+            pkt_id = 0
+    return DNSPacket(header=DNSHeader(id=pkt_id, qr=1, rcode=rcode))
+
+
+def _clamp_response_ttls(packet: DNSPacket, ttl: int) -> None:
+    """Rewrites answer and authority record TTLs to the cached clamped TTL.
+
+    Keeps the response shown to the client consistent with what the cache
+    stores (the forwarded response would otherwise carry the raw upstream
+    TTL while the cache serves a clamped one). OPT records (type 41) are
+    never touched: their TTL field carries EDNS flags, not a time-to-live.
+    """
+    for rr in packet.answers:
+        if rr.rtype != TYPE_OPT:
+            rr.ttl = ttl
+    for rr in packet.authorities:
+        if rr.rtype != TYPE_OPT:
+            rr.ttl = ttl
+
+
+def _sanitize_edns(request: DNSPacket, response: DNSPacket) -> None:
+    """Makes the forwarded response EDNS-consistent with the client (RFC 6891).
+
+    The response gets exactly one fresh OPT record when the client sent an
+    OPT, and no OPT record at all when it did not.
+    """
+    additionals = [rr for rr in response.additionals if rr.rtype != TYPE_OPT]
+    client_opt = find_request_opt(request)
+    if client_opt is not None:
+        additionals.append(make_opt_record(do_flag=bool(client_opt.ttl & 0x8000)))
+    response.additionals = additionals
 
 
 async def process_query(
@@ -79,7 +127,10 @@ async def process_query(
 
     Returns raw DNS response bytes. Never raises (returns SERVFAIL on unexpected errors).
     """
-    start_time = time.monotonic()
+    # perf_counter is the highest-resolution monotonic clock on every platform
+    # (time.monotonic has ~15 ms granularity on Windows and would round
+    # short latencies down to 0).
+    start_time = time.perf_counter()
 
     def _make_event(
         pkt: DNSPacket | None,
@@ -97,11 +148,23 @@ async def process_query(
             status=status,
             matched_rule=matched_rule,
             upstream=upstream,
-            latency_ms=(time.monotonic() - start_time) * 1000,
+            latency_ms=(time.perf_counter() - start_time) * 1000,
             response_code=rcode,
         )
 
     def _dispatch(event: QueryEvent) -> None:
+        # The persistent query_log writer arrives with objective 5; until then
+        # the event is emitted to the log and buffered in the in-memory queue.
+        logger.info(
+            "query_log: status=%s name=%s type=%s client=%s upstream=%s latency=%.1fms rcode=%d",
+            event.status,
+            event.question_name,
+            event.question_type,
+            event.client_ip,
+            event.upstream or "-",
+            event.latency_ms,
+            event.response_code,
+        )
         if cfg.log_queue is None:
             return
         try:
@@ -115,25 +178,29 @@ async def process_query(
         try:
             return pkt.to_wire()
         except Exception as e:
-            logger.error("Failed to serialize response: %s", e)
+            logger.error("Failed to serialize response: %s: %s", type(e).__name__, e)
             return b""
+
+    def _blocked(
+        request: DNSPacket,
+        matched_rule: str | None,
+        status: str,
+        upstream: str | None = None,
+    ) -> bytes:
+        """Builds, logs and serializes a blocking response (FR-08)."""
+        block_resp = make_blocking_response(
+            request,
+            block_mode=cfg.block_mode,
+            blocking_ipv4=cfg.blocking_ipv4,
+            blocking_ipv6=cfg.blocking_ipv6,
+            ttl=cfg.block_ttl,
+        )
+        _dispatch(_make_event(block_resp, status, matched_rule=matched_rule, upstream=upstream))
+        return _respond(block_resp)
 
     # ── Step 1: ACL ──────────────────────────────────────────────────────────
     if not cfg.acl.is_allowed(client_ip):
-        # We have no parsed packet yet - build minimal REFUSED with no questions
-        refused = DNSPacket(
-            header=__import__("reqko.dns.protocol", fromlist=["DNSHeader"]).DNSHeader(
-                id=0, qr=1, rcode=RCODE_REFUSED
-            )
-        )
-        # Can't build a proper question response without parsing, so try to extract ID
-        try:
-            import struct
-
-            pkt_id = struct.unpack_from("!H", raw_data, 0)[0] if len(raw_data) >= 2 else 0
-            refused.header.id = pkt_id
-        except Exception:
-            pass
+        refused = _make_early_response(raw_data, RCODE_REFUSED)
         _dispatch(
             QueryEvent(
                 client_ip=client_ip,
@@ -142,7 +209,7 @@ async def process_query(
                 status="REFUSED_ACL",
                 matched_rule=None,
                 upstream=None,
-                latency_ms=(time.monotonic() - start_time) * 1000,
+                latency_ms=(time.perf_counter() - start_time) * 1000,
                 response_code=RCODE_REFUSED,
             )
         )
@@ -150,15 +217,7 @@ async def process_query(
 
     # ── Step 2: Rate Limit ────────────────────────────────────────────────────
     if not cfg.rate_limiter.is_allowed(client_ip):
-        try:
-            import struct
-
-            pkt_id = struct.unpack_from("!H", raw_data, 0)[0] if len(raw_data) >= 2 else 0
-        except Exception:
-            pkt_id = 0
-        from reqko.dns.protocol import DNSHeader
-
-        refused = DNSPacket(header=DNSHeader(id=pkt_id, qr=1, rcode=RCODE_REFUSED))
+        refused = _make_early_response(raw_data, RCODE_REFUSED)
         _dispatch(
             QueryEvent(
                 client_ip=client_ip,
@@ -167,7 +226,7 @@ async def process_query(
                 status="REFUSED_RATE_LIMIT",
                 matched_rule=None,
                 upstream=None,
-                latency_ms=(time.monotonic() - start_time) * 1000,
+                latency_ms=(time.perf_counter() - start_time) * 1000,
                 response_code=RCODE_REFUSED,
             )
         )
@@ -177,16 +236,8 @@ async def process_query(
     try:
         request = parse_wire(raw_data)
     except DNSFormatError as e:
-        from reqko.dns.protocol import DNSHeader
-
-        try:
-            import struct
-
-            pkt_id = struct.unpack_from("!H", raw_data, 0)[0] if len(raw_data) >= 2 else 0
-        except Exception:
-            pkt_id = 0
-        formerr = DNSPacket(header=DNSHeader(id=pkt_id, qr=1, rcode=RCODE_FORMERR))
-        logger.debug("FORMERR from %s: %s", client_ip, e)
+        formerr = _make_early_response(raw_data, RCODE_FORMERR)
+        logger.debug("FORMERR from %s: %s: %s", client_ip, type(e).__name__, e)
         _dispatch(
             QueryEvent(
                 client_ip=client_ip,
@@ -195,17 +246,15 @@ async def process_query(
                 status="ERROR_FORMAT",
                 matched_rule=None,
                 upstream=None,
-                latency_ms=(time.monotonic() - start_time) * 1000,
+                latency_ms=(time.perf_counter() - start_time) * 1000,
                 response_code=RCODE_FORMERR,
             )
         )
         return _respond(formerr)
 
     if not request.questions:
-        from reqko.dns.protocol import DNSHeader
-
-        formerr = DNSPacket(header=DNSHeader(id=request.header.id, qr=1, rcode=RCODE_FORMERR))
-        _dispatch(_make_event(request, "ERROR_FORMAT"))
+        formerr = make_response(request, rcode=RCODE_FORMERR)
+        _dispatch(_make_event(formerr, "ERROR_FORMAT"))
         return _respond(formerr)
 
     question = request.questions[0]
@@ -218,62 +267,29 @@ async def process_query(
         _dispatch(_make_event(refused_resp, "REFUSED_ANY"))
         return _respond(refused_resp)
 
-    # ── Step 5: Allowlist Check ───────────────────────────────────────────────
-    is_whitelisted, _whitelist_rule = cfg.filter_engine.is_allowlisted(qname)
-
-    # ── Step 6: Blocklist Check ───────────────────────────────────────────────
-    if not is_whitelisted:
-        block_result = cfg.filter_engine.match(qname)
-        if block_result.is_blocked:
-            block_resp = make_blocking_response(
-                request,
-                block_mode=cfg.block_mode,
-                blocking_ipv4=cfg.blocking_ipv4,
-                blocking_ipv6=cfg.blocking_ipv6,
-                ttl=cfg.block_ttl,
-            )
-            _dispatch(
-                _make_event(block_resp, "BLOCKED_BLACKLIST", matched_rule=block_result.matched_rule)
-            )
-            return _respond(block_resp)
+    # ── Steps 5+6: Allowlist priority + Blocklist Check (FR-04, FR-06, FR-07) ─
+    # match() checks the allowlist first, so one call covers both steps.
+    match_result = cfg.filter_engine.match(qname)
+    if match_result.is_blocked:
+        return _blocked(request, match_result.matched_rule, "BLOCKED_BLACKLIST")
+    is_whitelisted = match_result.status == "ALLOWED"
 
     # ── Step 7: Cache Lookup ──────────────────────────────────────────────────
     cache_entry = cfg.cache.get(qname, qtype)
     if cache_entry is not None:
         # ── Step 7a: Cache-hit re-validation (FR-04, FR-09) ──────────────────
-        # Re-check the queried name against current rules (new rules apply immediately)
+        # Re-check against the snapshot current at this moment, so rules added
+        # after caching still block immediately.
         recheck = cfg.filter_engine.match(qname)
         if recheck.is_blocked:
-            block_resp = make_blocking_response(
-                request,
-                block_mode=cfg.block_mode,
-                blocking_ipv4=cfg.blocking_ipv4,
-                blocking_ipv6=cfg.blocking_ipv6,
-                ttl=cfg.block_ttl,
-            )
-            _dispatch(
-                _make_event(block_resp, "BLOCKED_BLACKLIST", matched_rule=recheck.matched_rule)
-            )
-            return _respond(block_resp)
+            return _blocked(request, recheck.matched_rule, "BLOCKED_BLACKLIST")
 
-        # Re-check CNAME targets (FR-09) unless the queried name is whitelisted
-        if not is_whitelisted and cache_entry.cname_targets:
+        # Re-check CNAME targets (FR-09) unless the queried name is allowlisted
+        if recheck.status != "ALLOWED" and cache_entry.cname_targets:
             for cname_target in cache_entry.cname_targets:
                 cname_result = cfg.filter_engine.match(cname_target, is_cname=True)
                 if cname_result.is_blocked:
-                    block_resp = make_blocking_response(
-                        request,
-                        block_mode=cfg.block_mode,
-                        blocking_ipv4=cfg.blocking_ipv4,
-                        blocking_ipv6=cfg.blocking_ipv6,
-                        ttl=cfg.block_ttl,
-                    )
-                    _dispatch(
-                        _make_event(
-                            block_resp, "BLOCKED_CNAME", matched_rule=cname_result.matched_rule
-                        )
-                    )
-                    return _respond(block_resp)
+                    return _blocked(request, cname_result.matched_rule, "BLOCKED_CNAME")
 
         # Serve from cache
         cached_resp = cfg.cache.build_response(request, cache_entry)
@@ -282,10 +298,9 @@ async def process_query(
 
     # ── Step 8: Upstream Query ────────────────────────────────────────────────
     try:
-        upstream_resp = await query_upstream(
+        upstream_resp, upstream_used = await query_upstream(
             request, cfg.upstreams, timeout=cfg.upstream_timeout
         )
-        upstream_used = f"{cfg.upstreams[0][0]}:{cfg.upstreams[0][1]}"
     except UpstreamError as e:
         logger.warning("All upstreams failed for %s: %s", qname, e)
         servfail = make_servfail(request)
@@ -294,35 +309,24 @@ async def process_query(
 
     # ── Step 9: CNAME Uncloaking (FR-09) ─────────────────────────────────────
     if not is_whitelisted:
-        cname_targets_from_upstream: list[str] = []
         for rr in upstream_resp.answers:
-            from reqko.dns.protocol import TYPE_CNAME
-
             if rr.rtype == TYPE_CNAME and isinstance(rr.rdata, str):
-                cname_targets_from_upstream.append(rr.rdata.strip(".").lower())
-
-        for cname_target in cname_targets_from_upstream:
-            cname_result = cfg.filter_engine.match(cname_target, is_cname=True)
-            if cname_result.is_blocked:
-                block_resp = make_blocking_response(
-                    request,
-                    block_mode=cfg.block_mode,
-                    blocking_ipv4=cfg.blocking_ipv4,
-                    blocking_ipv6=cfg.blocking_ipv6,
-                    ttl=cfg.block_ttl,
+                cname_result = cfg.filter_engine.match(
+                    rr.rdata.strip(".").lower(), is_cname=True
                 )
-                _dispatch(
-                    _make_event(
-                        block_resp,
+                if cname_result.is_blocked:
+                    return _blocked(
+                        request,
+                        cname_result.matched_rule,
                         "BLOCKED_CNAME",
-                        matched_rule=cname_result.matched_rule,
                         upstream=upstream_used,
                     )
-                )
-                return _respond(block_resp)
 
-    # ── Step 10: Cache Store ──────────────────────────────────────────────────
-    cfg.cache.set(qname, qtype, upstream_resp)
+    # ── Step 10: Cache Store (FR-03) + TTL consistency ────────────────────────
+    _sanitize_edns(request, upstream_resp)
+    entry = cfg.cache.set(qname, qtype, upstream_resp)
+    if entry is not None:
+        _clamp_response_ttls(upstream_resp, int(entry.expires_at - entry.created_at))
 
     # ── Step 11: Respond ──────────────────────────────────────────────────────
     status = "ALLOWED" if is_whitelisted else "FORWARDED"

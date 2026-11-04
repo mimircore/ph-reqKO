@@ -14,6 +14,7 @@ from reqko.dns.protocol import (
     RCODE_NOERROR,
     RCODE_NXDOMAIN,
     TYPE_CNAME,
+    TYPE_OPT,
     TYPE_SOA,
     DNSPacket,
     DNSRecord,
@@ -134,7 +135,9 @@ class DNSCache:
             qtype=qtype,
             answers=list(packet.answers),
             authorities=list(packet.authorities),
-            additionals=list(packet.additionals),
+            # Never cache the EDNS0 OPT pseudo-RR (RFC 6891): its TTL field
+            # carries EDNS flags, and a fresh OPT is synthesized per response.
+            additionals=[rr for rr in packet.additionals if rr.rtype != TYPE_OPT],
             cname_targets=cname_targets,
             response_code=rcode,
             created_at=now,
@@ -187,6 +190,10 @@ class DNSCache:
             )
 
         for rr in entry.additionals:
+            # OPT pseudo-RRs are never cached (see set()), so this is only a
+            # defensive guard: a fresh OPT is appended by make_response().
+            if rr.rtype == TYPE_OPT:
+                continue
             resp.additionals.append(
                 DNSRecord(
                     name=rr.name,

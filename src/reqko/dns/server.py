@@ -98,6 +98,13 @@ async def run_dns_servers(
         local_addr=(dns_host, dns_port),
     )
 
+    # RFC 1035: UDP and TCP listen on the SAME port. With port 0 (ephemeral,
+    # used by tests) the actual assigned port is taken from the UDP socket.
+    if dns_port == 0:
+        sock = udp_transport.get_extra_info("socket")
+        if sock is not None:
+            dns_port = sock.getsockname()[1]
+
     # TCP with connection semaphore
     semaphore = asyncio.Semaphore(tcp_max_connections)
 
