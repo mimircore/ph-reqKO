@@ -76,7 +76,9 @@ CREATE TABLE IF NOT EXISTS stats_hourly (
     forwarded_queries INTEGER NOT NULL DEFAULT 0,
     allowed_queries INTEGER NOT NULL DEFAULT 0,
     refused_queries INTEGER NOT NULL DEFAULT 0,
-    error_queries INTEGER NOT NULL DEFAULT 0
+    error_queries INTEGER NOT NULL DEFAULT 0,
+    latency_sum REAL NOT NULL DEFAULT 0,
+    latency_samples INTEGER NOT NULL DEFAULT 0
 );
 
 -- 6. Таблица параметров и настроек

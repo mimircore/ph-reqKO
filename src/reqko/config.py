@@ -12,9 +12,11 @@ from typing import Literal
 
 BlockMode = Literal["NULL", "NXDOMAIN", "NODATA"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
+LogClientIPMode = Literal["full", "anonymized", "off"]
 
 VALID_BLOCK_MODES: set[str] = {"NULL", "NXDOMAIN", "NODATA"}
 VALID_LOG_LEVELS: set[str] = {"DEBUG", "INFO", "WARNING", "ERROR"}
+VALID_LOG_CLIENT_IP_MODES: set[str] = {"full", "anonymized", "off"}
 
 DEFAULT_ALLOWED_NETWORKS = (
     "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1/128,fe80::/10"
@@ -30,13 +32,17 @@ class ConfigError(ValueError):
 class Config:
     """Strongly typed application configuration."""
 
-    api_key: str
+    # Admin API token. None means "generate once at first start and persist
+    # the SHA-256 hash in the database" (FR-17 bootstrap alternative).
+    admin_token: str | None
     dns_host: str = "0.0.0.0"
     dns_port: int = 53
-    http_host: str = "0.0.0.0"
-    http_port: int = 8080
+    api_host: str = "127.0.0.1"
+    api_port: int = 8080
     metrics_host: str = "127.0.0.1"
     metrics_port: int = 9100
+    # Optional read-only API token (GET endpoints only).
+    read_token: str | None = None
     upstream_dns: list[tuple[str, int]] = field(
         default_factory=lambda: [("9.9.9.9", 53), ("149.112.112.112", 53)]
     )
@@ -60,33 +66,48 @@ class Config:
     cache_min_ttl: int = 60
     cache_max_ttl: int = 86400
     anonymize_ips: bool = False
-    log_retention_days: int = 30
+    log_retention_days: int = 7
     db_path: str = "/data/reqko.db"
     log_level: LogLevel = "INFO"
     # Local blocklist files loaded into the filter engine at startup
-    # (comma-separated paths, REQKO_BLOCKLIST_FILES). Remote URL scheduling
-    # and list management via API are objective 5.
+    # (comma-separated paths, REQKO_BLOCKLIST_FILES).
     blocklist_files: list[str] = field(default_factory=list)
+    # Remote blocklist URLs (comma-separated http(s) URLs,
+    # REQKO_BLOCKLIST_URLS), refreshed by POST /api/v1/blocklists/update.
+    blocklist_urls: list[str] = field(default_factory=list)
+    # Query log privacy: full IP, anonymized (mask last IPv4 octet /
+    # last 80 bits of IPv6) or off (empty string stored).
+    log_client_ip: LogClientIPMode = "full"
+    # Async query-log writer: flush after N buffered events or T seconds.
+    log_batch_size: int = 100
+    log_flush_interval: float = 2.0
+    # Per-IP failed-auth rate limiting on the API.
+    auth_failure_limit: int = 10
+    auth_failure_window: float = 60.0
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> Config:
         """Create and validate Config from environment variables."""
         env = os.environ if environ is None else environ
 
-        # 1. API key is mandatory
-        api_key = env.get("REQKO_API_KEY", "").strip()
-        if not api_key:
-            raise ConfigError(
-                "REQKO_API_KEY is required and cannot be empty. "
-                "Refusing to start without an API key."
-            )
+        # 1. API tokens (FR-17). REQKO_ADMIN_TOKEN (or legacy REQKO_API_KEY)
+        # sets the admin token; REQKO_READ_TOKEN sets an optional read-only
+        # token. If no admin token is configured, the entry point generates
+        # one at first start, prints it once and stores only the hash.
+        admin_token = (
+            env.get("REQKO_ADMIN_TOKEN") or env.get("REQKO_API_KEY") or ""
+        ).strip() or None
+        read_token = env.get("REQKO_READ_TOKEN", "").strip() or None
 
         # 2. Host and ports
         dns_host = env.get("REQKO_DNS_HOST", "0.0.0.0").strip()
         dns_port = _parse_port(env.get("REQKO_DNS_PORT", "53"), "REQKO_DNS_PORT")
 
-        http_host = env.get("REQKO_HTTP_HOST", "0.0.0.0").strip()
-        http_port = _parse_port(env.get("REQKO_HTTP_PORT", "8080"), "REQKO_HTTP_PORT")
+        api_host = (
+            env.get("REQKO_API_HOST") or env.get("REQKO_HTTP_HOST") or "127.0.0.1"
+        ).strip()
+        api_port_raw = env.get("REQKO_API_PORT") or env.get("REQKO_HTTP_PORT") or "8080"
+        api_port = _parse_port(api_port_raw, "REQKO_API_PORT")
 
         metrics_host = env.get("REQKO_METRICS_HOST", "127.0.0.1").strip()
         metrics_port = _parse_port(
@@ -162,7 +183,7 @@ class Config:
         # 10. Privacy & retention
         anonymize_ips = _parse_bool(env.get("REQKO_ANONYMIZE_IPS", "false"))
         log_retention_days = _parse_positive_int(
-            env.get("REQKO_LOG_RETENTION_DAYS", "30"), "REQKO_LOG_RETENTION_DAYS"
+            env.get("REQKO_LOG_RETENTION_DAYS", "7"), "REQKO_LOG_RETENTION_DAYS"
         )
 
         # 11. Storage & Logging
@@ -177,22 +198,67 @@ class Config:
             )
         log_level: LogLevel = raw_log_level  # type: ignore[assignment]
 
-        # 12. Local blocklist files (loaded at startup; scheduling of remote
-        # URL sources is objective 5)
+        # 12. Blocklist sources: local files (startup) and remote URLs
+        # (refresh via POST /api/v1/blocklists/update)
         blocklist_files = [
             item.strip()
             for item in env.get("REQKO_BLOCKLIST_FILES", "").split(",")
             if item.strip()
         ]
+        blocklist_urls = [
+            item.strip()
+            for item in env.get("REQKO_BLOCKLIST_URLS", "").split(",")
+            if item.strip()
+        ]
+
+        # 13. Query log writer and privacy
+        raw_log_client_ip = env.get("REQKO_LOG_CLIENT_IP", "").strip().lower()
+        if not raw_log_client_ip:
+            # Legacy REQKO_ANONYMIZE_IPS=true is equivalent to anonymized
+            raw_log_client_ip = "anonymized" if anonymize_ips else "full"
+        if raw_log_client_ip not in VALID_LOG_CLIENT_IP_MODES:
+            raise ConfigError(
+                f"Invalid REQKO_LOG_CLIENT_IP: '{raw_log_client_ip}'. "
+                "Expected full, anonymized, or off."
+            )
+        log_client_ip: LogClientIPMode = raw_log_client_ip  # type: ignore[assignment]
+
+        log_batch_size = _parse_positive_int(
+            env.get("REQKO_LOG_BATCH_SIZE", "100"), "REQKO_LOG_BATCH_SIZE"
+        )
+        try:
+            log_flush_interval = float(env.get("REQKO_LOG_FLUSH_INTERVAL", "2.0"))
+            if log_flush_interval <= 0:
+                raise ValueError
+        except ValueError as err:
+            raise ConfigError(
+                f"Invalid REQKO_LOG_FLUSH_INTERVAL: "
+                f"{env.get('REQKO_LOG_FLUSH_INTERVAL')}. Must be positive float."
+            ) from err
+
+        # 14. API auth failure rate limiting
+        auth_failure_limit = _parse_positive_int(
+            env.get("REQKO_AUTH_FAILURE_LIMIT", "10"), "REQKO_AUTH_FAILURE_LIMIT"
+        )
+        try:
+            auth_failure_window = float(env.get("REQKO_AUTH_FAILURE_WINDOW", "60.0"))
+            if auth_failure_window <= 0:
+                raise ValueError
+        except ValueError as err:
+            raise ConfigError(
+                f"Invalid REQKO_AUTH_FAILURE_WINDOW: "
+                f"{env.get('REQKO_AUTH_FAILURE_WINDOW')}. Must be positive float."
+            ) from err
 
         return cls(
-            api_key=api_key,
+            admin_token=admin_token,
             dns_host=dns_host,
             dns_port=dns_port,
-            http_host=http_host,
-            http_port=http_port,
+            api_host=api_host,
+            api_port=api_port,
             metrics_host=metrics_host,
             metrics_port=metrics_port,
+            read_token=read_token,
             upstream_dns=upstream_dns,
             upstream_timeout=upstream_timeout,
             block_mode=block_mode,
@@ -209,6 +275,12 @@ class Config:
             db_path=db_path,
             log_level=log_level,
             blocklist_files=blocklist_files,
+            blocklist_urls=blocklist_urls,
+            log_client_ip=log_client_ip,
+            log_batch_size=log_batch_size,
+            log_flush_interval=log_flush_interval,
+            auth_failure_limit=auth_failure_limit,
+            auth_failure_window=auth_failure_window,
         )
 
 
