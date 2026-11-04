@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import urllib.parse
-from collections.abc import Callable
+import urllib.request
+from collections.abc import Callable, Sequence
+from pathlib import Path
 
 import aiohttp
 
@@ -14,6 +15,10 @@ from reqko.filtering.engine import FilterEngine, FilterSnapshot
 from reqko.filtering.parser import parse_filter_lines
 
 logger = logging.getLogger(__name__)
+
+# Local list files are only read from these directories by default (FR-10,
+# path traversal protection, docs/03-architecture.md section 11).
+DEFAULT_ALLOWED_LIST_DIRS: tuple[str, ...] = ("/data/lists",)
 
 
 class UpdaterError(Exception):
@@ -28,28 +33,42 @@ async def _download_url(url: str, timeout: float = 30.0) -> str:
             return await resp.text(encoding="utf-8", errors="replace")
 
 
-def _read_local_file(path: str) -> str:
-    """Safely reads a local file, checking for path traversal."""
-    abs_path = os.path.realpath(path)
-    # Disallow path traversal outside /tmp and /data
-    if not (abs_path.startswith("/tmp") or abs_path.startswith("/data") or abs_path.startswith("/etc")):
-        # Allow any existing readable path for flexibility; log for audit
-        logger.debug("Reading local blocklist file: %s", abs_path)
+def _read_local_file(path: str, allowed_dirs: Sequence[str]) -> str:
+    """Reads a local list file, rejecting paths outside allowed directories."""
+    abs_path = Path(path).resolve()
+    for raw_dir in allowed_dirs:
+        allowed_dir = Path(raw_dir).resolve()
+        if abs_path.is_relative_to(allowed_dir):
+            break
+    else:
+        raise UpdaterError(
+            f"Local list path {abs_path} is outside the allowed directories "
+            f"({', '.join(str(Path(d).resolve()) for d in allowed_dirs)})"
+        )
     with open(abs_path, encoding="utf-8", errors="replace") as f:
         return f.read()
 
 
-async def fetch_list(url: str) -> str:
+async def fetch_list(
+    url: str,
+    allowed_local_dirs: Sequence[str] = DEFAULT_ALLOWED_LIST_DIRS,
+) -> str:
     """Fetches a blocklist by URL or file path."""
     parsed = urllib.parse.urlparse(url)
-    if parsed.scheme in ("http", "https"):
+    scheme = parsed.scheme.lower()
+    if scheme in ("http", "https"):
         return await _download_url(url)
-    elif parsed.scheme in ("file", ""):
-        path = parsed.path if parsed.scheme == "file" else url
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _read_local_file, path)
-    else:
-        raise UpdaterError(f"Unsupported URL scheme: {parsed.scheme}")
+    if scheme in ("file", "") or len(scheme) == 1:
+        # len(scheme) == 1 covers Windows drive letters: urlparse("C:\\x")
+        # reports scheme "c". For the file scheme, convert the URL path part
+        # back to a platform path (e.g. "file:///C:/x" -> "C:\\x").
+        if scheme == "file":
+            path = urllib.request.url2pathname(parsed.path)
+        else:
+            path = url
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _read_local_file, path, allowed_local_dirs)
+    raise UpdaterError(f"Unsupported URL scheme: {parsed.scheme}")
 
 
 def _parse_in_executor_sync(content: str) -> FilterSnapshot:
@@ -63,6 +82,7 @@ async def update_filter_engine(
     list_urls: list[str],
     version: int = 1,
     on_success: Callable[[int, int], None] | None = None,
+    allowed_local_dirs: Sequence[str] = DEFAULT_ALLOWED_LIST_DIRS,
 ) -> FilterSnapshot:
     """Downloads all lists, merges rules, and atomically swaps the engine snapshot.
 
@@ -72,16 +92,24 @@ async def update_filter_engine(
         logger.warning("No blocklist URLs configured, skipping update")
         return engine.snapshot
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     merged_lines: list[str] = []
 
     for url in list_urls:
         try:
-            content = await fetch_list(url)
+            content = await fetch_list(url, allowed_local_dirs=allowed_local_dirs)
             merged_lines.extend(content.splitlines())
             logger.info("Loaded blocklist: %s (%d lines)", url, len(content.splitlines()))
         except Exception as e:
-            logger.error("Failed to fetch blocklist %s: %s", url, e)
+            # Log the exception type and HTTP status (if any) instead of
+            # formatting the exception object: some aiohttp exceptions crash
+            # when interpolated into a message.
+            logger.error(
+                "Failed to fetch blocklist %s: %s (status=%s)",
+                url,
+                type(e).__name__,
+                getattr(e, "status", None),
+            )
             # Continue with other sources
 
     if not merged_lines:
@@ -90,21 +118,30 @@ async def update_filter_engine(
 
     # Parse in thread executor to avoid blocking the event loop
     try:
-        new_snapshot = await loop.run_in_executor(
+        parsed_snapshot = await loop.run_in_executor(
             None, _parse_in_executor_sync, "\n".join(merged_lines)
         )
-        # Assign version
-        object.__setattr__(new_snapshot, "version", version) if hasattr(new_snapshot, "__dict__") else None
+        if parsed_snapshot.rules_count == 0:
+            # Content was fetched but no valid rule parsed out of it: most
+            # likely a corrupt or foreign list - keep the last working rules.
+            logger.error(
+                "Parsed 0 valid rules from the blocklist sources — keeping existing rules (FR-10)"
+            )
+            return engine.snapshot
         new_snapshot = FilterSnapshot(
-            exact_set=new_snapshot.exact_set,
-            wildcard_set=new_snapshot.wildcard_set,
-            allow_exact_set=new_snapshot.allow_exact_set,
-            allow_wildcard_set=new_snapshot.allow_wildcard_set,
+            exact_set=parsed_snapshot.exact_set,
+            wildcard_set=parsed_snapshot.wildcard_set,
+            allow_exact_set=parsed_snapshot.allow_exact_set,
+            allow_wildcard_set=parsed_snapshot.allow_wildcard_set,
             version=version,
-            rules_count=new_snapshot.rules_count,
+            rules_count=parsed_snapshot.rules_count,
         )
     except Exception as e:
-        logger.error("Failed to parse blocklist rules: %s — keeping existing (FR-10)", e)
+        logger.error(
+            "Failed to parse blocklist rules: %s: %s — keeping existing (FR-10)",
+            type(e).__name__,
+            e,
+        )
         return engine.snapshot
 
     # Atomic swap (FR-10)
