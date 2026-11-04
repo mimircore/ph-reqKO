@@ -63,6 +63,10 @@ class Config:
     log_retention_days: int = 30
     db_path: str = "/data/reqko.db"
     log_level: LogLevel = "INFO"
+    # Local blocklist files loaded into the filter engine at startup
+    # (comma-separated paths, REQKO_BLOCKLIST_FILES). Remote URL scheduling
+    # and list management via API are objective 5.
+    blocklist_files: list[str] = field(default_factory=list)
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> Config:
@@ -173,6 +177,14 @@ class Config:
             )
         log_level: LogLevel = raw_log_level  # type: ignore[assignment]
 
+        # 12. Local blocklist files (loaded at startup; scheduling of remote
+        # URL sources is objective 5)
+        blocklist_files = [
+            item.strip()
+            for item in env.get("REQKO_BLOCKLIST_FILES", "").split(",")
+            if item.strip()
+        ]
+
         return cls(
             api_key=api_key,
             dns_host=dns_host,
@@ -196,6 +208,7 @@ class Config:
             log_retention_days=log_retention_days,
             db_path=db_path,
             log_level=log_level,
+            blocklist_files=blocklist_files,
         )
 
 

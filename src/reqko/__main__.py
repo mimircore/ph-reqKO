@@ -6,6 +6,7 @@ import asyncio
 import logging
 import signal
 import sys
+from pathlib import Path
 
 from reqko.config import Config, ConfigError
 from reqko.dns.acl import ClientACL
@@ -14,6 +15,7 @@ from reqko.dns.pipeline import PipelineConfig
 from reqko.dns.ratelimit import RateLimiter
 from reqko.dns.server import run_dns_servers
 from reqko.filtering.engine import FilterEngine
+from reqko.filtering.updater import update_filter_engine
 
 logger = logging.getLogger("reqko")
 
@@ -48,6 +50,27 @@ async def _run(config: Config) -> None:
         log_queue_drop_counter=log_drop_counter,
     )
 
+    # Load local blocklist files into the filter engine before going ready.
+    # The REST API list manager and scheduled remote updates are objective 5.
+    if config.blocklist_files:
+        allowed_dirs = sorted(
+            {str(Path(p).resolve().parent) for p in config.blocklist_files}
+        )
+        logger.info(
+            "Loading %d local blocklist file(s): %s",
+            len(config.blocklist_files),
+            ", ".join(config.blocklist_files),
+        )
+        snapshot = await update_filter_engine(
+            filter_engine,
+            config.blocklist_files,
+            version=1,
+            allowed_local_dirs=allowed_dirs,
+        )
+        logger.info("Filter rules loaded: %d rules (version %d)", snapshot.rules_count, snapshot.version)
+    else:
+        logger.info("No blocklist files configured (REQKO_BLOCKLIST_FILES); filter engine starts empty")
+
     # Start DNS servers
     udp_transport, tcp_server = await run_dns_servers(
         pipeline_cfg,
@@ -58,14 +81,15 @@ async def _run(config: Config) -> None:
     )
 
     logger.info(
-        "ph-reqKO DNS resolver ready on %s:%d (block_mode=%s)",
+        "ph-reqKO DNS resolver ready on %s:%d (UDP+TCP, block_mode=%s)",
         config.dns_host,
         config.dns_port,
         config.block_mode,
     )
 
-    # Graceful shutdown on SIGINT/SIGTERM
-    loop = asyncio.get_event_loop()
+    # Graceful shutdown on SIGINT/SIGTERM. loop.add_signal_handler is not
+    # supported on Windows (ProactorEventLoop) - fall back to signal.signal.
+    loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
 
     def _shutdown() -> None:
@@ -73,7 +97,13 @@ async def _run(config: Config) -> None:
         stop_event.set()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _shutdown)
+        try:
+            loop.add_signal_handler(sig, _shutdown)
+        except NotImplementedError:
+            try:
+                signal.signal(sig, lambda _sig, _frame: _shutdown())
+            except (ValueError, OSError):
+                pass
 
     await stop_event.wait()
 
@@ -97,10 +127,20 @@ def main() -> int:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
     logger.info("Starting ph-reqKO DNS resolver v0.1.0")
-    logger.info("DNS: %s:%d | API: %s:%d | Metrics: %s:%d",
-                config.dns_host, config.dns_port,
-                config.http_host, config.http_port,
-                config.metrics_host, config.metrics_port)
+    logger.info(
+        "DNS listeners: %s:%d (UDP+TCP)",
+        config.dns_host,
+        config.dns_port,
+    )
+    # The REST API and the Prometheus metrics exporter are NOT started:
+    # they are objective 5 and not implemented yet.
+    logger.info(
+        "REST API (%s:%d) and metrics exporter (%s:%d) are not implemented yet (objective 5)",
+        config.http_host,
+        config.http_port,
+        config.metrics_host,
+        config.metrics_port,
+    )
     logger.info("Block mode: %s | Upstreams: %s", config.block_mode, config.upstream_dns)
 
     try:
