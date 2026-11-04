@@ -12,7 +12,7 @@
 
 | Модуль | Путь | Назначение | Требования |
 |--------|------|-----------|-----------|
-| `config` | `src/reqko/config.py` | Typed dataclass для всех переменных `REQKO_*` (включая `REQKO_BLOCKLIST_FILES` — локальные списки, загружаемые на старте), строгая валидация, обязательный `REQKO_API_KEY` | NFR-08, NFR-09 |
+| `config` | `src/reqko/config.py` | Typed dataclass для всех переменных `REQKO_*` (включая `REQKO_BLOCKLIST_FILES` — локальные списки, загружаемые на старте), строгая валидация, обязательный `REQKO_API_KEY` | NFR-08 |
 | `storage/migrations` | `src/reqko/storage/migrations.py` | Идемпотентное применение DDL-схемы, WAL-прагмы SQLite, таблица `schema_migrations` | FR-11, FR-12, FR-19 |
 | `storage/schema.sql` | `src/reqko/storage/schema.sql` | Точная DDL-схема: 6 таблиц, 10 статусов `query_log`, почасовые счётчики `stats_hourly` | FR-11, FR-12, FR-19 |
 | `dns/protocol` | `src/reqko/dns/protocol.py` | Wire-парсер и сериализатор RFC 1035: Header, Question, A, AAAA, CNAME, SOA, raw RDATA; сжатие 0xC0; детектирование петель; лимит 255 байт; OPT-запись EDNS0 (RFC 6891) | NFR-10 |
@@ -116,19 +116,19 @@ All checks passed!
 Success: no issues found in 30 source files
 
 > .venv\Scripts\python.exe -m pytest
-........................................................................ [ 75%]
-........................                                                 [100%]
-96 passed in 5.43s
+........................................................................ [ 74%]
+.........................                                                [100%]
+97 passed in 5.42s
 ```
 
-Все 96 тестов проходят без единой ошибки или пропуска.
+Все 97 тестов проходят без единой ошибки или пропуска.
 
 ### 5.3 Покрытие кода
 
 ```
 > .venv\Scripts\python.exe -m pytest --cov=reqko --cov-report=term-missing -q
-........................................................................ [ 75%]
-........................                                                 [100%]
+........................................................................ [ 74%]
+.........................                                                [100%]
 
 Name                              Stmts   Miss  Cover   Missing
 ---------------------------------------------------------------
@@ -137,20 +137,20 @@ src\reqko\__main__.py                68     68     0%   3-155
 src\reqko\config.py                 140      9    94%   141-143, 171, 247, 254-255, 258, 268
 src\reqko\dns\__init__.py             2      0   100%
 src\reqko\dns\acl.py                 15      0   100%
-src\reqko\dns\cache.py               91      7    92%   93, 126, 151, 182, 195-197
-src\reqko\dns\pipeline.py           149     15    90%   87-88, 104-105, 157-160, 165-167, 241-243, 270
-src\reqko\dns\protocol.py           304     35    88%   ...
+src\reqko\dns\cache.py               92      7    92%   97, 130, 156, 187, 200-202
+src\reqko\dns\pipeline.py           150     15    90%   87-88, 104-105, 172-175, 180-182, 256-258, 285
+src\reqko\dns\protocol.py           304     35    88%   142, 183, 196, 208-210, 220, 222-224, 226-227, 229-241, 245-247, 328, 335, 343, 352, 363, 371-372, 377, 395, 409, 413, 423, 428, 436
 src\reqko\dns\ratelimit.py           37      2    95%   37, 48
-src\reqko\dns\server.py              69      9    87%   37-38, 41, 64, 68-69, 76, 81-82
-src\reqko\dns\upstream.py            84     14    83%   ...
+src\reqko\dns\server.py              73     12    84%   37-38, 41, 64, 68-69, 76, 81-82, 123-126
+src\reqko\dns\upstream.py            84     14    83%   49-50, 54, 90-91, 106, 136-145, 154, 162-166
 src\reqko\filtering\__init__.py       3      0   100%
 src\reqko\filtering\engine.py        56      0   100%
-src\reqko\filtering\parser.py        98     10    90%   ...
-src\reqko\filtering\updater.py       73      7    90%   ...
+src\reqko\filtering\parser.py        98     10    90%   52-55, 88, 123, 133, 142, 171, 184
+src\reqko\filtering\updater.py       73      7    90%   33, 66, 71, 139-145, 154
 src\reqko\storage\__init__.py         2      0   100%
 src\reqko\storage\migrations.py      35      3    91%   21, 26, 37
 ---------------------------------------------------------------
-TOTAL                              1227    179    85%
+TOTAL                              1233    182    85%
 ```
 
 Суммарное покрытие **85%** (целевой ориентир NFR-09 — более 70%). `__main__.py` не покрыт автотестами (точка входа проверяется демо-запуском, раздел 6).
@@ -195,6 +195,8 @@ Start-Process -FilePath '.venv\Scripts\python.exe' -ArgumentList '-m','reqko' `
 ```
 
 Стартовый журнал не заявляет API/Metrics как слушающие — они не реализованы (Цель 5).
+
+Примечание: приведённые ниже выводы клиента и журнала сервера собраны за несколько прогонов одной и той же конфигурации сервера (в ходе отладки сервер перезапускался; каждый блок соответствует реальному выводу соответствующего прогона).
 
 ### Реальные выходные данные клиента
 
@@ -251,7 +253,7 @@ TTL первого (forwarded) ответа равен TTL, сохранённо
 2026-11-04 02:08:11,563 [INFO] reqko.dns.pipeline: query_log: status=REFUSED_ANY name=example.com type=ANY client=127.0.0.1 upstream=- latency=0.1ms rcode=5
 ```
 
-**[4] TCP-запрос (уход из кеша по TCP):**
+**[4] TCP-запрос (закешированный ответ, обслуженный по TCP):**
 
 ```
 [TCP A example.com] rcode=NOERROR answers=1
