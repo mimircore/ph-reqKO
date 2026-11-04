@@ -22,9 +22,10 @@ services:
       # Compose refuses to start without explicit tokens (:? syntax)
       REQKO_ADMIN_TOKEN: ${REQKO_ADMIN_TOKEN:?Set REQKO_ADMIN_TOKEN in .env (copy .env.example)}
       REQKO_READ_TOKEN: ${REQKO_READ_TOKEN:?Set REQKO_READ_TOKEN in .env (copy .env.example)}
-      # Unprivileged DNS port inside the container (host 53 -> container 5353)
+      # Listen on 53 directly: the sysctl below allows binding privileged
+      # ports without root and without CAP_NET_BIND_SERVICE
       REQKO_DNS_HOST: 0.0.0.0
-      REQKO_DNS_PORT: "5353"
+      REQKO_DNS_PORT: "53"
       # API reachable only inside the compose network (via the proxy);
       # deliberately NOT published to the host
       REQKO_API_HOST: 0.0.0.0
@@ -40,18 +41,27 @@ services:
       REQKO_BLOCKLIST_URLS: ${REQKO_BLOCKLIST_URLS:-}
     volumes:
       - reqko-data:/data
+    sysctls:
+      # Bind port 53 as UID 10001 without any capabilities
+      net.ipv4.ip_unprivileged_port_start: 0
     ports:
       # Default bind is localhost only; publishing 0.0.0.0:53 to the internet
       # makes the resolver open to everyone - keep the ACL and rate limit on
       # (see docs/06-remote-access.md)
-      - "${REQKO_DNS_BIND:-127.0.0.1}:53:5353/udp"
-      - "${REQKO_DNS_BIND:-127.0.0.1}:53:5353/tcp"
+      - "${REQKO_DNS_BIND:-127.0.0.1}:53:53/udp"
+      - "${REQKO_DNS_BIND:-127.0.0.1}:53:53/tcp"
     networks:
-      - backend
-      - upstream
+      backend:
+        # Fixed address: VPN clients use 172.28.0.10 as their DNS server
+        # (routed through the WireGuard tunnel on the backend network)
+        ipv4_address: 172.28.0.10
+      upstream:
 
   proxy:
-    image: caddy:2.8.4
+    build:
+      context: ./docker/caddy
+      dockerfile: Dockerfile
+    image: ph-reqko-caddy:0.1.0
     restart: unless-stopped
     read_only: true
     tmpfs:
@@ -71,9 +81,14 @@ services:
     volumes:
       - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
     ports:
-      - "${REQKO_HTTPS_BIND:-127.0.0.1}:443:443"
+      # Caddy listens on unprivileged 8443 inside the container (its binary
+      # runs with cap_drop ALL); the host still sees 443
+      - "${REQKO_HTTPS_BIND:-127.0.0.1}:443:8443"
     networks:
       - backend
+      # Publishing ports requires a non-internal network (internal networks
+      # cannot publish); `edge` carries only the published 443
+      - edge
 
   # Optional secure-remote-access path (VPN-only DNS + panel):
   #   docker compose --profile vpn up -d
@@ -95,18 +110,24 @@ services:
     volumes:
       - ./docker/wireguard:/config
     ports:
-      - "${REQKO_WG_BIND:-51820}:51820/udp"
+      - "${REQKO_WG_BIND:-127.0.0.1}:51820:51820/udp"
     sysctls:
       - net.ipv4.conf.all.src_valid_mark=1
     networks:
       - backend
+      - edge
 
 networks:
   # internal: true -> no direct internet access; proxy <-> reqko only
   backend:
     internal: true
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
   # reqko also needs egress for upstream DNS and blocklist URL refresh
   upstream: {}
+  # non-internal network for published ports (443, 51820/udp)
+  edge: {}
 
 volumes:
   reqko-data:

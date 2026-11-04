@@ -26,23 +26,30 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # Non-root runtime user (fixed UID/GID) and the data volume it owns.
-# The resolver listens on unprivileged ports (5353) inside the container,
-# so no CAP_NET_BIND_SERVICE and no root are needed.
-RUN groupadd --gid 10001 reqko \
+# The container's sysctl net.ipv4.ip_unprivileged_port_start=0 (set in
+# compose) lets the resolver bind port 53 directly without root and
+# without CAP_NET_BIND_SERVICE.
+# The base image is version-pinned for reproducibility, so its Debian
+# packages age: pull current security updates at build time.
+RUN apt-get update \
+ && apt-get -y upgrade --no-install-recommends \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --gid 10001 reqko \
  && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin reqko \
  && mkdir -p /data \
  && chown -R 10001:10001 /data
 
 COPY --from=builder /dist/ /tmp/dist/
 RUN pip install --no-cache-dir /tmp/dist/*.whl \
+ && pip uninstall --no-cache-dir -y setuptools wheel \
  && rm -rf /tmp/dist
 
 VOLUME ["/data"]
 
 USER 10001:10001
 
-# DNS on unprivileged 5353 (mapped to host 53 in compose), API on 8080
-EXPOSE 5353/tcp 5353/udp 8080/tcp
+# DNS on 53 (bound without root via the compose sysctl), API on 8080
+EXPOSE 53/tcp 53/udp 8080/tcp
 
 # /health is public and needs no token; no curl in the image, so use python
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
