@@ -2,7 +2,7 @@
 
 A DNS server that blocks ad and tracker domains for your devices — a Pi-hole-style DNS filter written in Python.
 
-> **Status:** work in progress.
+> **Status:** the resolver core (objective 4) is implemented and tested: UDP/TCP DNS forwarding, caching with TTL, blocklist filtering with allowlist priority, CNAME uncloaking, ACL, rate limiting. The REST API, statistics storage, web panel and Docker deployment are not implemented yet (objectives 5–8).
 
 ## Goal
 
@@ -31,20 +31,45 @@ Python (`asyncio`), SQLite, REST API, Docker / Docker Compose, Prometheus, Grafa
 
 ## Development
 
+Python 3.11+ is required.
+
+### Windows (PowerShell)
+
+```powershell
+# Create virtual environment and install dependencies
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+
+# Lint, type check, and test
+.\.venv\Scripts\python.exe -m ruff check .
+.\.venv\Scripts\python.exe -m mypy src tests
+.\.venv\Scripts\python.exe -m pytest -q
+
+# Run server (port 5454, API key required, local blocklist file)
+$env:REQKO_API_KEY='changeme'
+$env:REQKO_DNS_PORT='5454'; $env:REQKO_DNS_HOST='127.0.0.1'
+$env:REQKO_BLOCKLIST_FILES='C:\path\to\blocklist.txt'
+.\.venv\Scripts\python.exe -m reqko
+```
+
+### Linux (bash)
+
 ```bash
 # Create virtual environment and install dependencies
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 
-# Run server (port 5454, API key required)
-REQKO_API_KEY=changeme REQKO_DNS_PORT=5454 REQKO_DNS_HOST=127.0.0.1 \
-  .venv/bin/python -m reqko
-
 # Lint, type check, and test
 .venv/bin/ruff check .
 .venv/bin/mypy src tests
 .venv/bin/pytest -q
+
+# Run server (port 5454, API key required, local blocklist file)
+REQKO_API_KEY=changeme REQKO_DNS_PORT=5454 REQKO_DNS_HOST=127.0.0.1 \
+  REQKO_BLOCKLIST_FILES=/path/to/blocklist.txt .venv/bin/python -m reqko
 ```
+
+All configuration is done through `REQKO_*` environment variables (see [docs/03-architecture.md](docs/03-architecture.md), section 9).
 
 ## Documentation
 
