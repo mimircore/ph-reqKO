@@ -23,6 +23,7 @@ from reqko.dns.server import run_dns_servers
 from reqko.filtering.engine import FilterEngine
 from reqko.filtering.rules import RuleManager
 from reqko.filtering.updater import update_filter_engine
+from reqko.metrics.exporter import MetricsRegistry, create_metrics_app
 from reqko.storage.migrations import get_db_connection, init_database
 from reqko.storage.retention import RetentionJob
 from reqko.storage.settings import get_setting, set_setting
@@ -82,6 +83,12 @@ async def _run(config: Config) -> None:
     engine = FilterEngine()
     rule_manager = RuleManager(engine, conn)
     await asyncio.get_running_loop().run_in_executor(None, rule_manager.load_persisted)
+
+    # Prometheus metrics registry (NFR-07): updates from the DNS hot path
+    # are O(1) and isolated from resolving (NFR-03); the exposition site is
+    # a separate aiohttp app, NOT the main API app.
+    metrics = MetricsRegistry()
+    rule_manager.on_rules_changed = metrics.set_active_rules
 
     allowed_dirs = tuple(
         sorted({str(Path(p).resolve().parent) for p in config.blocklist_files})
@@ -145,6 +152,7 @@ async def _run(config: Config) -> None:
         block_mode=config.block_mode,
         log_queue=queue,
         log_queue_drop_counter=log_drop_counter,
+        metrics=metrics,
     )
 
     udp_transport, tcp_server = await run_dns_servers(
@@ -187,12 +195,30 @@ async def _run(config: Config) -> None:
         config.api_host,
         config.api_port,
     )
-    # The Prometheus metrics exporter is still not implemented.
-    logger.info(
-        "Metrics exporter (%s:%d) is not implemented yet (objective 7)",
-        config.metrics_host,
-        config.metrics_port,
-    )
+
+    # ── Prometheus metrics site (NFR-07): separate app, GET /metrics only,
+    # client IP validated against REQKO_ALLOWED_NETWORKS. A metrics failure
+    # must not affect resolving (NFR-03): the DNS servers above are already
+    # independent of this site.
+    metrics_app = create_metrics_app(metrics, acl)
+    metrics_runner = web.AppRunner(metrics_app, access_log=None)
+    await metrics_runner.setup()
+    metrics_site = web.TCPSite(metrics_runner, config.metrics_host, config.metrics_port)
+    try:
+        await metrics_site.start()
+        logger.info(
+            "Metrics endpoint listening on %s:%d/metrics (Prometheus format)",
+            config.metrics_host,
+            config.metrics_port,
+        )
+    except OSError as exc:
+        # Metrics are best-effort: resolving continues without them.
+        logger.warning(
+            "Metrics endpoint could not start on %s:%d (%s) - continuing without metrics",
+            config.metrics_host,
+            config.metrics_port,
+            exc,
+        )
 
     # ── Graceful shutdown on SIGINT/SIGTERM ─────────────────────────────────
     # loop.add_signal_handler is not supported on Windows (ProactorEventLoop)
@@ -217,6 +243,7 @@ async def _run(config: Config) -> None:
 
     logger.info("Shutting down...")
     await runner.cleanup()
+    await metrics_runner.cleanup()
     udp_transport.close()
     tcp_server.close()
     await tcp_server.wait_closed()

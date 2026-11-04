@@ -30,7 +30,7 @@ class _UDPDNSProtocol(asyncio.DatagramProtocol):
         self, data: bytes, client_ip: str, addr: tuple[str, int]
     ) -> None:
         try:
-            response = await process_query(data, client_ip, self._cfg)
+            response = await process_query(data, client_ip, self._cfg, protocol="udp")
             transport = self._transport
             if response and transport is not None:
                 transport.sendto(response, addr)
@@ -68,7 +68,7 @@ async def _handle_tcp_client(
             except (asyncio.TimeoutError, asyncio.IncompleteReadError):
                 break
 
-            response = await process_query(data, client_ip, cfg)
+            response = await process_query(data, client_ip, cfg, protocol="tcp")
             if response:
                 writer.write(struct.pack("!H", len(response)) + response)
                 await writer.drain()

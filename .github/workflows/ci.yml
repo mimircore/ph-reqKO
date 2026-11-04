@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  lint-typecheck-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install package with dev dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Ruff
+        run: python -m ruff check .
+      - name: Mypy (strict)
+        run: python -m mypy src tests scripts
+      - name: Tests with coverage gate (NFR-09 above 70%)
+        run: pytest -q --cov=reqko --cov-report=term-missing --cov-fail-under=70
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4.4.1
+      - name: Build image
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ph-reqko:ci
+      - name: Trivy scan (fail on fixable HIGH/CRITICAL only)
+        # Policy choice (documented in docs/07-implementation.md):
+        # --ignore-unfixed, because unfixed Debian bookworm CVEs in the
+        # pinned base image would block CI forever with no available fix;
+        # every CVE with an available fix must be resolved before merge.
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ph-reqko:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+  buildx-multiarch:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4.4.0
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4.4.1
+      - name: Build for ${{ matrix.platform }}
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: false

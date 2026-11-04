@@ -1,0 +1,37 @@
+# Caddy reverse proxy for the ph-reqKO REST API and web panel.
+#
+# The container listens on UNPRIVILEGED port 8443 (the compose service
+# runs with cap_drop: ALL and the stock caddy binary's file capability
+# cap_net_bind_service is stripped at build time - see docker/caddy/);
+# compose publishes host 443 -> container 8443.
+#
+# The `localhost` site name makes Caddy issue a certificate from its
+# INTERNAL CA, so TLS works fully offline. Browsers will show a warning
+# until you trust the Caddy root certificate (see README, Docker quick
+# start). To use a real domain + Let's Encrypt instead, see
+# docs/06-remote-access.md.
+#
+# NOTE: stock Caddy has no rate-limit module (the ratelimit directive
+# requires a custom build). Brute-force protection for the API comes
+# from the app itself: per-IP failed-auth rate limiting (REQKO_AUTH_*).
+
+localhost:8443 {
+	tls internal
+	encode gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		-Server
+	}
+
+	request_body {
+		max_size 1MB
+	}
+
+	# /health and /ready stay public (FR-16); everything else forwards
+	# as-is - the app enforces the Bearer token (FR-17).
+	reverse_proxy reqko:8080
+}

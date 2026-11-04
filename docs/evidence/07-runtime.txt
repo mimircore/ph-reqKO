@@ -1,0 +1,662 @@
+=== docker --version 
+Docker version 29.9.2, build a82e528
+ 
+=== docker compose ps 
+NAME                    IMAGE                     COMMAND                  SERVICE      CREATED         STATUS                   PORTS
+ph-reqko-grafana-1      grafana/grafana:13.3.0    "/run.sh"                grafana      2 minutes ago   Up 2 minutes             127.0.0.1:3000->3000/tcp
+ph-reqko-prometheus-1   prom/prometheus:v3.15.1   "/bin/prometheus --c…"   prometheus   2 minutes ago   Up 2 minutes             9090/tcp
+ph-reqko-proxy-1        ph-reqko-caddy:0.1.0      "caddy run --config …"   proxy        2 minutes ago   Up 2 minutes             127.0.0.1:443->8443/tcp
+ph-reqko-reqko-1        ph-reqko:0.1.0            "python -m reqko"        reqko        2 minutes ago   Up 2 minutes (healthy)   192.168.1.8:53->53/tcp, 192.168.1.8:53->53/udp
+ 
+=== metrics endpoint from inside the backend network (via reqko exec) 
+HTTP 200, bytes: 5079
+dns_queries_total{protocol="udp",qtype="A"} 20
+dns_blocked_queries_total{reason="blacklist"} 12
+dns_query_duration_seconds_sum{class="cache"} 0.0006418410011974629
+dns_query_duration_seconds_count{class="cache"} 5
+dns_query_duration_seconds_sum{class="blocked"} 0.001066969000021345
+dns_query_duration_seconds_count{class="blocked"} 12
+dns_query_duration_seconds_sum{class="upstream"} 0.011991250999926706
+dns_query_duration_seconds_count{class="upstream"} 3
+dns_query_duration_seconds_sum{class="error"} 0
+dns_query_duration_seconds_count{class="error"} 0
+dns_cache_hits_total 5
+dns_cache_misses_total 3
+dns_active_rules_count 77760
+dns_dropped_logs_total 0
+ 
+=== metrics port NOT reachable from the host 
+http://127.0.0.1:9100/metrics -> HTTP %{http_code} ^(000 = connection failed, expected^)
+ 
+=== DNS traffic through the published port (user LAN bind) 
+  1. example.com A -> 104.20.23.154 (8.9 ms)
+  2. example.com A -> 104.20.23.154 (4.1 ms)
+  3. wikipedia.org A -> 185.15.59.224 (8.4 ms)
+  4. github.com A -> 140.82.121.4 (8.4 ms)
+  5. ads.example.com A -> 0.0.0.0 (3.3 ms)
+  6. ads.example.com A -> 0.0.0.0 (3.3 ms)
+  7. doubleclick.net A -> 0.0.0.0 (5.8 ms)
+  8. doubleclick.net A -> 0.0.0.0 (3.2 ms)
+  9. doubleclick.net A -> 0.0.0.0 (2.8 ms)
+ 10. tracker.example.net A -> 0.0.0.0 (3.7 ms)
+Summary: total=10 blocked=6 errors=0
+ 
+=== prometheus target health 
+target: http://reqko:9100/metrics | health: up
+=== dashboard PromQL via prometheus API (all expressions) 
+PANEL  1 [success] results=1 :: up{job="reqko"}
+PANEL  2 [success] results=1 :: dns_active_rules_count{job="reqko"}
+PANEL  3 [success] results=1 :: sum(rate(dns_queries_total[1m]))
+PANEL  4 [success] results=1 :: 100 * sum(rate(dns_blocked_queries_total[1m])) / clamp_min(sum(rate(dns_queries_
+PANEL  5 [success] results=1 :: sum(rate(dns_cache_hits_total[5m])) / clamp_min(sum(rate(dns_cache_hits_total[5m
+PANEL 10 [success] results=1 :: sum by (protocol) (rate(dns_queries_total[1m]))
+PANEL 11 [success] results=4 :: histogram_quantile(0.50, sum by (le, class) (rate(dns_query_duration_seconds_buc
+PANEL 11 [success] results=4 :: histogram_quantile(0.95, sum by (le, class) (rate(dns_query_duration_seconds_buc
+PANEL 11 [success] results=4 :: histogram_quantile(0.99, sum by (le, class) (rate(dns_query_duration_seconds_buc
+PANEL 12 [success] results=1 :: sum by (reason) (rate(dns_blocked_queries_total[5m]))
+PANEL 13 [success] results=1 :: sum(rate(dns_dropped_logs_total[5m]))
+PANEL 14 [success] results=1 :: process_resident_memory_bytes{job="reqko"}
+PANEL 15 [success] results=1 :: sum(rate(dns_cache_hits_total[5m]))
+PANEL 15 [success] results=1 :: sum(rate(dns_cache_misses_total[5m]))
+expressions with empty/failed results: 0
+ 
+=== grafana verification 
+login HTTP: 200
+datasources: [('Prometheus', 'prometheus', 'http://prometheus:9090')]
+search results: [('dg3bjbomh6g3kb', 'ph-reqKO'), ('reqko-overview', 'ph-reqKO overview')]
+dashboard panels: 11
+ 
+=== non-root ids 
+uid=65534(nobody) gid=65534(nobody) groups=65534(nobody)
+uid=472(grafana) gid=0(root) groups=0(root)
+ 
+=== read-only write attempts 
+touch: /x: Read-only file system
+sh: can't create /x: Read-only file system
+write-failed-read-only
+ 
+=== trivy totals 
+2026-11-04T21:18:52Z	INFO	[vulndb] Need to update DB
+2026-11-04T21:18:52Z	INFO	[vulndb] Downloading vulnerability DB...
+2026-11-04T21:18:52Z	INFO	[vulndb] Downloading artifact...	repo="mirror.gcr.io/aquasec/trivy-db:2"
+2026-11-04T21:19:09Z	INFO	[vulndb] Artifact successfully downloaded	repo="mirror.gcr.io/aquasec/trivy-db:2"
+2026-11-04T21:19:09Z	INFO	[vuln] Vulnerability scanning is enabled
+2026-11-04T21:19:09Z	INFO	[secret] Secret scanning is enabled
+2026-11-04T21:19:09Z	INFO	[secret] If your scanning is slow, please try '--scanners vuln' to disable secret scanning
+2026-11-04T21:19:09Z	INFO	[secret] Please see https://trivy.dev/docs/v0.76/guide/scanner/secret#recommendation for faster secret detection
+2026-11-04T21:19:13Z	INFO	[python] Licenses acquired from one or more METADATA files may be subject to additional terms. Use `--debug` flag to see all affected packages.
+2026-11-04T21:19:14Z	INFO	Detected OS	family="debian" version="12.15"
+2026-11-04T21:19:14Z	INFO	[debian] Detecting vulnerabilities...	os_version="12" pkg_num=106
+2026-11-04T21:19:14Z	INFO	Number of language-specific files	num=1
+2026-11-04T21:19:14Z	INFO	[python-pkg] Detecting vulnerabilities...
+2026-11-04T21:19:14Z	WARN	Using severities from other vendors for some vulnerabilities. Read https://trivy.dev/docs/v0.76/guide/scanner/vulnerability#severity-selection for details.
+
+Report Summary
+
+┌──────────────────────────────────────────────────────────────────────────────────┬────────────┬─────────────────┬─────────┐
+│                                      Target                                      │    Type    │ Vulnerabilities │ Secrets │
+├──────────────────────────────────────────────────────────────────────────────────┼────────────┼─────────────────┼─────────┤
+│ ph-reqko:0.1.0 (debian 12.15)                                                    │   debian   │       41        │    -    │
+├──────────────────────────────────────────────────────────────────────────────────┼────────────┼─────────────────┼─────────┤
+│ usr/local/lib/python3.11/site-packages/aiohappyeyeballs-2.7.1.dist-info/METADATA │ python-pkg │        0        │    -    │
+├──────────────────────────────────────────────────────────────────────────────────┼────────────┼─────────────────┼─────────┤
+│ usr/local/lib/python3.11/site-packages/aiohttp-3.14.5.dist-info/METADATA         │ python-pkg │        0        │    -    │
+├──────────────────────────────────────────────────────────────────────────────────┼────────────┼─────────────────┼─────────┤
+│ usr/local/lib/python3.11/site-packages/aiosignal-1.4.0.dist-info/METADATA        │ python-pkg │        0        │    -    │
+├──────────────────────────────────────────────────────────────────────────────────┼────────────┼─────────────────┼─────────┤
+│ usr/local/lib/python3.11/site-packages/attrs-26.1.0.dist-info/METADATA           │ python-pkg │        0        │    -    │
+├──────────────────────────────────────────────────────────────────────────────────┼────────────┼─────────────────┼─────────┤
+│ usr/local/lib/python3.11/site-packages/frozenlist-1.8.0.dist-info/METADATA       │ python-pkg │        0        │    -    │
+├──────────────────────────────────────────────────────────────────────────────────┼────────────┼─────────────────┼─────────┤
+│ usr/local/lib/python3.11/site-packages/idna-3.20.dist-info/METADATA              │ python-pkg │        0        │    -    │
+├──────────────────────────────────────────────────────────────────────────────────┼────────────┼─────────────────┼─────────┤
+│ usr/local/lib/python3.11/site-packages/multidict-7.2.1.dist-info/METADATA        │ python-pkg │        0        │    -    │
+├──────────────────────────────────────────────────────────────────────────────────┼────────────┼─────────────────┼─────────┤
+│ usr/local/lib/python3.11/site-packages/pip-24.0.dist-info/METADATA               │ python-pkg │        0        │    -    │
+├──────────────────────────────────────────────────────────────────────────────────┼────────────┼─────────────────┼─────────┤
+│ usr/local/lib/python3.11/site-packages/propcache-0.5.4.dist-info/METADATA        │ python-pkg │        0        │    -    │
+├──────────────────────────────────────────────────────────────────────────────────┼────────────┼─────────────────┼─────────┤
+│ usr/local/lib/python3.11/site-packages/reqko-0.1.0.dist-info/METADATA            │ python-pkg │        0        │    -    │
+├──────────────────────────────────────────────────────────────────────────────────┼────────────┼─────────────────┼─────────┤
+│ usr/local/lib/python3.11/site-packages/typing_extensions-4.16.0.dist-info/METAD- │ python-pkg │        0        │    -    │
+│ ATA                                                                              │            │                 │         │
+├──────────────────────────────────────────────────────────────────────────────────┼────────────┼─────────────────┼─────────┤
+│ usr/local/lib/python3.11/site-packages/yarl-1.25.1.dist-info/METADATA            │ python-pkg │        0        │    -    │
+└──────────────────────────────────────────────────────────────────────────────────┴────────────┴─────────────────┴─────────┘
+Legend:
+- '-': Not scanned
+- '0': Clean (no security findings detected)
+
+
+ph-reqko:0.1.0 (debian 12.15)
+=============================
+Total: 41 (HIGH: 39, CRITICAL: 2)
+
+┌──────────────────┬─────────────────┬──────────┬──────────────┬────────────────────┬───────────────┬──────────────────────────────────────────────────────────────┐
+│     Library      │  Vulnerability  │ Severity │    Status    │ Installed Version  │ Fixed Version │                            Title                             │
+├──────────────────┼─────────────────┼──────────┼──────────────┼────────────────────┼───────────────┼──────────────────────────────────────────────────────────────┤
+│ bsdutils         │ CVE-2026-53613  │ HIGH     │ affected     │ 1:2.38.1-5+deb12u3 │               │ util-linux: TOCTOU in the mount program via ancestor         │
+│                  │                 │          │              │                    │               │ directory swap on target...                                  │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-53613                   │
+│                  ├─────────────────┤          │              │                    ├───────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-53615  │          │              │                    │               │ util-linux: util-linux: Partition metadata compromise via    │
+│                  │                 │          │              │                    │               │ integer overflow in DOS partition parser...                  │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-53615                   │
+│                  ├─────────────────┤          │              │                    ├───────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-78410  │          │              │                    │               │ util-linux: util-linux: restricted bind mounts do not pin    │
+│                  │                 │          │              │                    │               │ the source, allowing X-mount.owner/group/mode...             │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-78410                   │
+├──────────────────┼─────────────────┤          ├──────────────┼────────────────────┼───────────────┼──────────────────────────────────────────────────────────────┤
+│ gzip             │ CVE-2026-41992  │          │ fix_deferred │ 1.12-1             │               │ gzip: gzip: Information disclosure via global buffer         │
+│                  │                 │          │              │                    │               │ overflow in LZH decompression                                │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-41992                   │
+├──────────────────┼─────────────────┤          │              ├────────────────────┼───────────────┼──────────────────────────────────────────────────────────────┤
+│ libacl1          │ CVE-2026-54369  │          │              │ 2.3.1-3            │               │ acl: Symlink traversal privilege escalation via libacl       │
+│                  │                 │          │              │                    │               │ functions                                                    │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-54369                   │
+├──────────────────┼─────────────────┤          ├──────────────┼────────────────────┼───────────────┼──────────────────────────────────────────────────────────────┤
+│ libblkid1        │ CVE-2026-53613  │          │ affected     │ 2.38.1-5+deb12u3   │               │ util-linux: TOCTOU in the mount program via ancestor         │
+│                  │                 │          │              │                    │               │ directory swap on target...                                  │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-53613                   │
+│                  ├─────────────────┤          │              │                    ├───────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-53615  │          │              │                    │               │ util-linux: util-linux: Partition metadata compromise via    │
+│                  │                 │          │              │                    │               │ integer overflow in DOS partition parser...                  │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-53615                   │
+│                  ├─────────────────┤          │              │                    ├───────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-78410  │          │              │                    │               │ util-linux: util-linux: restricted bind mounts do not pin    │
+│                  │                 │          │              │                    │               │ the source, allowing X-mount.owner/group/mode...             │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-78410                   │
+├──────────────────┼─────────────────┤          ├──────────────┼────────────────────┼───────────────┼──────────────────────────────────────────────────────────────┤
+│ libexpat1        │ CVE-2026-113351 │          │ fix_deferred │ 2.5.0-1+deb12u5    │               │ expat: expat: Denial of Service via improper memory tracking │
+│                  │                 │          │              │                    │               │ in XML_ParserReset                                           │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-113351                  │
+│                  ├─────────────────┤          ├──────────────┤                    ├───────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-117610 │          │ affected     │                    │               │ libexpat through 2.9.0 contains a NULL pointer dereference   │
+│                  │                 │          │              │                    │               │ vulnerabili ...                                              │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-117610                  │
+│                  ├─────────────────┤          │              │                    ├───────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-118370 │          │              │                    │               │ libexpat through 2.9.0 contains a signed integer overflow    │
+│                  │                 │          │              │                    │               │ vulnerabilit ...                                             │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-118370                  │
+├──────────────────┼─────────────────┤          │              ├────────────────────┼───────────────┼──────────────────────────────────────────────────────────────┤
+│ libmount1        │ CVE-2026-53613  │          │              │ 2.38.1-5+deb12u3   │               │ util-linux: TOCTOU in the mount program via ancestor         │
+│                  │                 │          │              │                    │               │ directory swap on target...                                  │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-53613                   │
+│                  ├─────────────────┤          │              │                    ├───────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-53615  │          │              │                    │               │ util-linux: util-linux: Partition metadata compromise via    │
+│                  │                 │          │              │                    │               │ integer overflow in DOS partition parser...                  │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-53615                   │
+│                  ├─────────────────┤          │              │                    ├───────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-78410  │          │              │                    │               │ util-linux: util-linux: restricted bind mounts do not pin    │
+│                  │                 │          │              │                    │               │ the source, allowing X-mount.owner/group/mode...             │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-78410                   │
+├──────────────────┼─────────────────┤          │              ├────────────────────┼───────────────┼──────────────────────────────────────────────────────────────┤
+│ libncursesw6     │ CVE-2025-69720  │          │              │ 6.4-4              │               │ ncurses: ncurses: Buffer overflow vulnerability may lead to  │
+│                  │                 │          │              │                    │               │ arbitrary code execution.                                    │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2025-69720                   │
+├──────────────────┼─────────────────┤          │              ├────────────────────┼───────────────┼──────────────────────────────────────────────────────────────┤
+│ libsmartcols1    │ CVE-2026-53613  │          │              │ 2.38.1-5+deb12u3   │               │ util-linux: TOCTOU in the mount program via ancestor         │
+│                  │                 │          │              │                    │               │ directory swap on target...                                  │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-53613                   │
+│                  ├─────────────────┤          │              │                    ├───────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-53615  │          │              │                    │               │ util-linux: util-linux: Partition metadata compromise via    │
+│                  │                 │          │              │                    │               │ integer overflow in DOS partition parser...                  │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-53615                   │
+│                  ├─────────────────┤          │              │                    ├───────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-78410  │          │              │                    │               │ util-linux: util-linux: restricted bind mounts do not pin    │
+│                  │                 │          │              │                    │               │ the source, allowing X-mount.owner/group/mode...             │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-78410                   │
+├──────────────────┼─────────────────┼──────────┤              ├────────────────────┼───────────────┼──────────────────────────────────────────────────────────────┤
+│ libsqlite3-0     │ CVE-2025-7458   │ CRITICAL │              │ 3.40.1-2+deb12u2   │               │ sqlite: SQLite integer overflow                              │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2025-7458                    │
+│                  ├─────────────────┼──────────┼──────────────┤                    ├───────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-11822  │ HIGH     │ fix_deferred │                    │               │ sqlite: SQLite: Arbitrary code execution via crafted FTS5    │
+│                  │                 │          │              │                    │               │ full-text search data                                        │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-11822                   │
+│                  ├─────────────────┤          │              │                    ├───────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-11824  │          │              │                    │               │ sqlite: SQLite: Arbitrary code execution and crash via       │
+│                  │                 │          │              │                    │               │ heap-based buffer overflow in...                             │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-11824                   │
+│                  ├─────────────────┤          ├──────────────┤                    ├───────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-119373 │          │ affected     │                    │               │ sqlite: sqlite: Denial of service via heap-based buffer      │
+│                  │                 │          │              │                    │               │ overflow in FTS5                                             │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-119373                  │
+├──────────────────┼─────────────────┤          ├──────────────┼────────────────────┼───────────────┼──────────────────────────────────────────────────────────────┤
+│ libsystemd0      │ CVE-2026-16742  │          │ fix_deferred │ 252.39-1~deb12u2   │               │ systemd: systemd-homed: Local privilege escalation via       │
+│                  │                 │          │              │                    │               │ missing home-record signature verification                   │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-16742                   │
+├──────────────────┼─────────────────┤          ├──────────────┼────────────────────┼───────────────┼──────────────────────────────────────────────────────────────┤
+│ libtinfo6        │ CVE-2025-69720  │          │ affected     │ 6.4-4              │               │ ncurses: ncurses: Buffer overflow vulnerability may lead to  │
+│                  │                 │          │              │                    │               │ arbitrary code execution.                                    │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2025-69720                   │
+├──────────────────┼─────────────────┤          ├──────────────┼────────────────────┼───────────────┼──────────────────────────────────────────────────────────────┤
+│ libudev1         │ CVE-2026-16742  │          │ fix_deferred │ 252.39-1~deb12u2   │               │ systemd: systemd-homed: Local privilege escalation via       │
+│                  │                 │          │              │                    │               │ missing home-record signature verification                   │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-16742                   │
+├──────────────────┼─────────────────┤          ├──────────────┼────────────────────┼───────────────┼──────────────────────────────────────────────────────────────┤
+│ libuuid1         │ CVE-2026-53613  │          │ affected     │ 2.38.1-5+deb12u3   │               │ util-linux: TOCTOU in the mount program via ancestor         │
+│                  │                 │          │              │                    │               │ directory swap on target...                                  │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-53613                   │
+│                  ├─────────────────┤          │              │                    ├───────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-53615  │          │              │                    │               │ util-linux: util-linux: Partition metadata compromise via    │
+│                  │                 │          │              │                    │               │ integer overflow in DOS partition parser...                  │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-53615                   │
+│                  ├─────────────────┤          │              │                    ├───────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-78410  │          │              │                    │               │ util-linux: util-linux: restricted bind mounts do not pin    │
+│                  │                 │          │              │                    │               │ the source, allowing X-mount.owner/group/mode...             │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-78410                   │
+├──────────────────┼─────────────────┤          │              │                    ├───────────────┼──────────────────────────────────────────────────────────────┤
+│ mount            │ CVE-2026-53613  │          │              │                    │               │ util-linux: TOCTOU in the mount program via ancestor         │
+│                  │                 │          │              │                    │               │ directory swap on target...                                  │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-53613                   │
+│                  ├─────────────────┤          │              │                    ├───────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-53615  │          │              │                    │               │ util-linux: util-linux: Partition metadata compromise via    │
+│                  │                 │          │              │                    │               │ integer overflow in DOS partition parser...                  │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-53615                   │
+│                  ├─────────────────┤          │              │                    ├───────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-78410  │          │              │                    │               │ util-linux: util-linux: restricted bind mounts do not pin    │
+│                  │                 │          │              │                    │               │ the source, allowing X-mount.owner/group/mode...             │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-78410                   │
+├──────────────────┼─────────────────┤          │              ├────────────────────┼───────────────┼──────────────────────────────────────────────────────────────┤
+│ ncurses-base     │ CVE-2025-69720  │          │              │ 6.4-4              │               │ ncurses: ncurses: Buffer overflow vulnerability may lead to  │
+│                  │                 │          │              │                    │               │ arbitrary code execution.                                    │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2025-69720                   │
+├──────────────────┤                 │          │              │                    ├───────────────┤                                                              │
+│ ncurses-bin      │                 │          │              │                    │               │                                                              │
+│                  │                 │          │              │                    │               │                                                              │
+│                  │                 │          │              │                    │               │                                                              │
+├──────────────────┼─────────────────┤          ├──────────────┼────────────────────┼───────────────┼──────────────────────────────────────────────────────────────┤
+│ perl-base        │ CVE-2026-9538   │          │ fix_deferred │ 5.36.0-7+deb12u4   │               │ perl-Archive-Tar: perl-Archive-Tar: Denial of Service via    │
+│                  │                 │          │              │                    │               │ crafted tar header with large entry...                       │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-9538                    │
+├──────────────────┼─────────────────┤          ├──────────────┼────────────────────┼───────────────┼──────────────────────────────────────────────────────────────┤
+│ util-linux       │ CVE-2026-53613  │          │ affected     │ 2.38.1-5+deb12u3   │               │ util-linux: TOCTOU in the mount program via ancestor         │
+│                  │                 │          │              │                    │               │ directory swap on target...                                  │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-53613                   │
+│                  ├─────────────────┤          │              │                    ├───────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-53615  │          │              │                    │               │ util-linux: util-linux: Partition metadata compromise via    │
+│                  │                 │          │              │                    │               │ integer overflow in DOS partition parser...                  │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-53615                   │
+│                  ├─────────────────┤          │              │                    ├───────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-78410  │          │              │                    │               │ util-linux: util-linux: restricted bind mounts do not pin    │
+│                  │                 │          │              │                    │               │ the source, allowing X-mount.owner/group/mode...             │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-78410                   │
+├──────────────────┼─────────────────┤          │              │                    ├───────────────┼──────────────────────────────────────────────────────────────┤
+│ util-linux-extra │ CVE-2026-53613  │          │              │                    │               │ util-linux: TOCTOU in the mount program via ancestor         │
+│                  │                 │          │              │                    │               │ directory swap on target...                                  │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-53613                   │
+│                  ├─────────────────┤          │              │                    ├───────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-53615  │          │              │                    │               │ util-linux: util-linux: Partition metadata compromise via    │
+│                  │                 │          │              │                    │               │ integer overflow in DOS partition parser...                  │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-53615                   │
+│                  ├─────────────────┤          │              │                    ├───────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-78410  │          │              │                    │               │ util-linux: util-linux: restricted bind mounts do not pin    │
+│                  │                 │          │              │                    │               │ the source, allowing X-mount.owner/group/mode...             │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2026-78410                   │
+├──────────────────┼─────────────────┼──────────┼──────────────┼────────────────────┼───────────────┼──────────────────────────────────────────────────────────────┤
+│ zlib1g           │ CVE-2023-45853  │ CRITICAL │ will_not_fix │ 1:1.2.13.dfsg-1    │               │ zlib: integer overflow and resultant heap-based buffer       │
+│                  │                 │          │              │                    │               │ overflow in zipOpenNewFileInZip4_6                           │
+│                  │                 │          │              │                    │               │ https://avd.aquasec.com/nvd/cve-2023-45853                   │
+└──────────────────┴─────────────────┴──────────┴──────────────┴────────────────────┴───────────────┴──────────────────────────────────────────────────────────────┘
+2026-11-04T21:19:21Z	INFO	[vulndb] Need to update DB
+2026-11-04T21:19:21Z	INFO	[vulndb] Downloading vulnerability DB...
+2026-11-04T21:19:21Z	INFO	[vulndb] Downloading artifact...	repo="mirror.gcr.io/aquasec/trivy-db:2"
+2026-11-04T21:19:35Z	INFO	[vulndb] Artifact successfully downloaded	repo="mirror.gcr.io/aquasec/trivy-db:2"
+2026-11-04T21:19:35Z	INFO	[vuln] Vulnerability scanning is enabled
+2026-11-04T21:19:35Z	INFO	[secret] Secret scanning is enabled
+2026-11-04T21:19:35Z	INFO	[secret] If your scanning is slow, please try '--scanners vuln' to disable secret scanning
+2026-11-04T21:19:35Z	INFO	[secret] Please see https://trivy.dev/docs/v0.76/guide/scanner/secret#recommendation for faster secret detection
+2026-11-04T21:19:46Z	INFO	Number of language-specific files	num=2
+2026-11-04T21:19:46Z	INFO	[gobinary] Detecting vulnerabilities...
+2026-11-04T21:19:46Z	WARN	Using severities from other vendors for some vulnerabilities. Read https://trivy.dev/docs/v0.76/guide/scanner/vulnerability#severity-selection for details.
+
+Report Summary
+
+┌────────────────┬──────────┬─────────────────┬─────────┐
+│     Target     │   Type   │ Vulnerabilities │ Secrets │
+├────────────────┼──────────┼─────────────────┼─────────┤
+│ bin/prometheus │ gobinary │        0        │    -    │
+├────────────────┼──────────┼─────────────────┼─────────┤
+│ bin/promtool   │ gobinary │        0        │    -    │
+└────────────────┴──────────┴─────────────────┴─────────┘
+Legend:
+- '-': Not scanned
+- '0': Clean (no security findings detected)
+
+2026-11-04T21:19:47Z	INFO	[vulndb] Need to update DB
+2026-11-04T21:19:47Z	INFO	[vulndb] Downloading vulnerability DB...
+2026-11-04T21:19:47Z	INFO	[vulndb] Downloading artifact...	repo="mirror.gcr.io/aquasec/trivy-db:2"
+2026-11-04T21:20:03Z	INFO	[vulndb] Artifact successfully downloaded	repo="mirror.gcr.io/aquasec/trivy-db:2"
+2026-11-04T21:20:03Z	INFO	[vuln] Vulnerability scanning is enabled
+2026-11-04T21:20:03Z	INFO	[secret] Secret scanning is enabled
+2026-11-04T21:20:03Z	INFO	[secret] If your scanning is slow, please try '--scanners vuln' to disable secret scanning
+2026-11-04T21:20:03Z	INFO	[secret] Please see https://trivy.dev/docs/v0.76/guide/scanner/secret#recommendation for faster secret detection
+2026-11-04T21:20:42Z	INFO	Detected OS	family="alpine" version="3.24.3"
+2026-11-04T21:20:42Z	INFO	[alpine] Detecting vulnerabilities...	os_version="3.24" repository="3.24" pkg_num=29
+2026-11-04T21:20:42Z	INFO	Number of language-specific files	num=16
+2026-11-04T21:20:42Z	INFO	[gobinary] Detecting vulnerabilities...
+2026-11-04T21:20:42Z	INFO	[node-pkg] Detecting vulnerabilities...
+2026-11-04T21:20:42Z	WARN	Using severities from other vendors for some vulnerabilities. Read https://trivy.dev/docs/v0.76/guide/scanner/vulnerability#severity-selection for details.
+
+Report Summary
+
+┌──────────────────────────────────────────────────────────────────────────────────┬──────────┬─────────────────┬─────────┐
+│                                      Target                                      │   Type   │ Vulnerabilities │ Secrets │
+├──────────────────────────────────────────────────────────────────────────────────┼──────────┼─────────────────┼─────────┤
+│ grafana/grafana:13.3.0 (alpine 3.24.3)                                           │  alpine  │        0        │    -    │
+├──────────────────────────────────────────────────────────────────────────────────┼──────────┼─────────────────┼─────────┤
+│ usr/share/grafana/public/app/plugins/datasource/azuremonitor/package.json        │ node-pkg │        0        │    -    │
+├──────────────────────────────────────────────────────────────────────────────────┼──────────┼─────────────────┼─────────┤
+│ usr/share/grafana/public/app/plugins/datasource/grafana-testdata-datasource/pac- │ node-pkg │        0        │    -    │
+│ kage.json                                                                        │          │                 │         │
+├──────────────────────────────────────────────────────────────────────────────────┼──────────┼─────────────────┼─────────┤
+│ usr/share/grafana/public/app/plugins/datasource/graphite/package.json            │ node-pkg │        0        │    -    │
+├──────────────────────────────────────────────────────────────────────────────────┼──────────┼─────────────────┼─────────┤
+│ usr/share/grafana/bin/grafana                                                    │ gobinary │        0        │    -    │
+├──────────────────────────────────────────────────────────────────────────────────┼──────────┼─────────────────┼─────────┤
+│ usr/share/grafana/data/plugins-bundled/cloudwatch/gpx_grafana_cloudwatch_dataso- │ gobinary │        5        │    -    │
+│ urce_linux_amd64                                                                 │          │                 │         │
+├──────────────────────────────────────────────────────────────────────────────────┼──────────┼─────────────────┼─────────┤
+│ usr/share/grafana/data/plugins-bundled/elasticsearch/gpx_grafana_elasticsearch_- │ gobinary │        0        │    -    │
+│ datasource_linux_amd64                                                           │          │                 │         │
+├──────────────────────────────────────────────────────────────────────────────────┼──────────┼─────────────────┼─────────┤
+│ usr/share/grafana/data/plugins-bundled/grafana-postgresql-datasource/gpx_grafan- │ gobinary │        5        │    -    │
+│ a_postgresql_datasource_linux_amd64                                              │          │                 │         │
+├──────────────────────────────────────────────────────────────────────────────────┼──────────┼─────────────────┼─────────┤
+│ usr/share/grafana/data/plugins-bundled/grafana-pyroscope-datasource/gpx_grafana- │ gobinary │        1        │    -    │
+│ -pyroscope-datasource_linux_amd64                                                │          │                 │         │
+├──────────────────────────────────────────────────────────────────────────────────┼──────────┼─────────────────┼─────────┤
+│ usr/share/grafana/data/plugins-bundled/influxdb/gpx_grafana_influxdb_datasource- │ gobinary │        5        │    -    │
+│ _linux_amd64                                                                     │          │                 │         │
+├──────────────────────────────────────────────────────────────────────────────────┼──────────┼─────────────────┼─────────┤
+│ usr/share/grafana/data/plugins-bundled/jaeger/gpx_grafana-jaeger-datasource_lin- │ gobinary │        5        │    -    │
+│ ux_amd64                                                                         │          │                 │         │
+├──────────────────────────────────────────────────────────────────────────────────┼──────────┼─────────────────┼─────────┤
+│ usr/share/grafana/data/plugins-bundled/loki/gpx_grafana-loki-datasource_linux_a- │ gobinary │        5        │    -    │
+│ md64                                                                             │          │                 │         │
+├──────────────────────────────────────────────────────────────────────────────────┼──────────┼─────────────────┼─────────┤
+│ usr/share/grafana/data/plugins-bundled/mssql/gpx_grafana-mssql-datasource_linux- │ gobinary │        5        │    -    │
+│ _amd64                                                                           │          │                 │         │
+├──────────────────────────────────────────────────────────────────────────────────┼──────────┼─────────────────┼─────────┤
+│ usr/share/grafana/data/plugins-bundled/mysql/gpx_grafana-mysql-datasource_linux- │ gobinary │        5        │    -    │
+│ _amd64                                                                           │          │                 │         │
+├──────────────────────────────────────────────────────────────────────────────────┼──────────┼─────────────────┼─────────┤
+│ usr/share/grafana/data/plugins-bundled/opentsdb/gpx_grafana-opentsdb-datasource- │ gobinary │        1        │    -    │
+│ _linux_amd64                                                                     │          │                 │         │
+├──────────────────────────────────────────────────────────────────────────────────┼──────────┼─────────────────┼─────────┤
+│ usr/share/grafana/data/plugins-bundled/prometheus/gpx_grafana-prometheus-dataso- │ gobinary │        0        │    -    │
+│ urce_linux_amd64                                                                 │          │                 │         │
+├──────────────────────────────────────────────────────────────────────────────────┼──────────┼─────────────────┼─────────┤
+│ usr/share/grafana/data/plugins-bundled/stackdriver/gpx_grafana_cloudmonitoring_- │ gobinary │        0        │    -    │
+│ datasource_linux_amd64                                                           │          │                 │         │
+├──────────────────────────────────────────────────────────────────────────────────┼──────────┼─────────────────┼─────────┤
+│ usr/share/grafana/data/plugins-bundled/tempo/gpx_grafana-tempo-datasource_linux- │ gobinary │        2        │    -    │
+│ _amd64                                                                           │          │                 │         │
+├──────────────────────────────────────────────────────────────────────────────────┼──────────┼─────────────────┼─────────┤
+│ usr/share/grafana/data/plugins-bundled/zipkin/gpx_grafana-zipkin-datasource_lin- │ gobinary │        0        │    -    │
+│ ux_amd64                                                                         │          │                 │         │
+└──────────────────────────────────────────────────────────────────────────────────┴──────────┴─────────────────┴─────────┘
+Legend:
+- '-': Not scanned
+- '0': Clean (no security findings detected)
+
+
+usr/share/grafana/data/plugins-bundled/cloudwatch/gpx_grafana_cloudwatch_datasource_linux_amd64 (gobinary)
+==========================================================================================================
+Total: 5 (HIGH: 5, CRITICAL: 0)
+
+┌──────────────────┬─────────────────┬──────────┬────────┬───────────────────┬─────────────────┬──────────────────────────────────────────────────────────────┐
+│     Library      │  Vulnerability  │ Severity │ Status │ Installed Version │  Fixed Version  │                            Title                             │
+├──────────────────┼─────────────────┼──────────┼────────┼───────────────────┼─────────────────┼──────────────────────────────────────────────────────────────┤
+│ golang.org/x/net │ CVE-2026-78669  │ HIGH     │ fixed  │ v0.58.0           │ 0.60.0          │ net/http: net/http/internal/http2: golang.org/x/net/http2:   │
+│                  │                 │          │        │                   │                 │ net/http: Denial of Service via excessive HTTP/2 SETTINGS    │
+│                  │                 │          │        │                   │                 │ frames...                                                    │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-78669                   │
+├──────────────────┼─────────────────┤          │        ├───────────────────┼─────────────────┼──────────────────────────────────────────────────────────────┤
+│ stdlib           │ CVE-2026-111943 │          │        │ v1.26.7           │ 1.26.10, 1.27.3 │ crypto/x509: golang: crypto/x509: Man-in-the-middle attacks  │
+│                  │                 │          │        │                   │                 │ via untrusted intermediate certificates                      │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-111943                  │
+│                  ├─────────────────┤          │        │                   ├─────────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-78667  │          │        │                   │ 1.26.9, 1.27.2  │ net/http: golang: golang: Denial of Service via crafted HTTP │
+│                  │                 │          │        │                   │                 │ Range headers                                                │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-78667                   │
+│                  ├─────────────────┤          │        │                   │                 ├──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-78669  │          │        │                   │                 │ net/http: net/http/internal/http2: golang.org/x/net/http2:   │
+│                  │                 │          │        │                   │                 │ net/http: Denial of Service via excessive HTTP/2 SETTINGS    │
+│                  │                 │          │        │                   │                 │ frames...                                                    │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-78669                   │
+│                  ├─────────────────┤          │        │                   │                 ├──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-97031  │          │        │                   │                 │ crypto/tls: golang: crypto/tls: Denial of Service via        │
+│                  │                 │          │        │                   │                 │ multiple ECH outer extension references...                   │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-97031                   │
+└──────────────────┴─────────────────┴──────────┴────────┴───────────────────┴─────────────────┴──────────────────────────────────────────────────────────────┘
+
+usr/share/grafana/data/plugins-bundled/grafana-postgresql-datasource/gpx_grafana_postgresql_datasource_linux_amd64 (gobinary)
+=============================================================================================================================
+Total: 5 (HIGH: 5, CRITICAL: 0)
+
+┌──────────────────┬─────────────────┬──────────┬────────┬───────────────────┬─────────────────┬──────────────────────────────────────────────────────────────┐
+│     Library      │  Vulnerability  │ Severity │ Status │ Installed Version │  Fixed Version  │                            Title                             │
+├──────────────────┼─────────────────┼──────────┼────────┼───────────────────┼─────────────────┼──────────────────────────────────────────────────────────────┤
+│ golang.org/x/net │ CVE-2026-78669  │ HIGH     │ fixed  │ v0.58.0           │ 0.60.0          │ net/http: net/http/internal/http2: golang.org/x/net/http2:   │
+│                  │                 │          │        │                   │                 │ net/http: Denial of Service via excessive HTTP/2 SETTINGS    │
+│                  │                 │          │        │                   │                 │ frames...                                                    │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-78669                   │
+├──────────────────┼─────────────────┤          │        ├───────────────────┼─────────────────┼──────────────────────────────────────────────────────────────┤
+│ stdlib           │ CVE-2026-111943 │          │        │ v1.26.7           │ 1.26.10, 1.27.3 │ crypto/x509: golang: crypto/x509: Man-in-the-middle attacks  │
+│                  │                 │          │        │                   │                 │ via untrusted intermediate certificates                      │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-111943                  │
+│                  ├─────────────────┤          │        │                   ├─────────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-78667  │          │        │                   │ 1.26.9, 1.27.2  │ net/http: golang: golang: Denial of Service via crafted HTTP │
+│                  │                 │          │        │                   │                 │ Range headers                                                │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-78667                   │
+│                  ├─────────────────┤          │        │                   │                 ├──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-78669  │          │        │                   │                 │ net/http: net/http/internal/http2: golang.org/x/net/http2:   │
+│                  │                 │          │        │                   │                 │ net/http: Denial of Service via excessive HTTP/2 SETTINGS    │
+│                  │                 │          │        │                   │                 │ frames...                                                    │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-78669                   │
+│                  ├─────────────────┤          │        │                   │                 ├──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-97031  │          │        │                   │                 │ crypto/tls: golang: crypto/tls: Denial of Service via        │
+│                  │                 │          │        │                   │                 │ multiple ECH outer extension references...                   │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-97031                   │
+└──────────────────┴─────────────────┴──────────┴────────┴───────────────────┴─────────────────┴──────────────────────────────────────────────────────────────┘
+
+usr/share/grafana/data/plugins-bundled/grafana-pyroscope-datasource/gpx_grafana-pyroscope-datasource_linux_amd64 (gobinary)
+===========================================================================================================================
+Total: 1 (HIGH: 1, CRITICAL: 0)
+
+┌──────────────────┬────────────────┬──────────┬────────┬───────────────────┬───────────────┬────────────────────────────────────────────────────────────┐
+│     Library      │ Vulnerability  │ Severity │ Status │ Installed Version │ Fixed Version │                           Title                            │
+├──────────────────┼────────────────┼──────────┼────────┼───────────────────┼───────────────┼────────────────────────────────────────────────────────────┤
+│ golang.org/x/net │ CVE-2026-78669 │ HIGH     │ fixed  │ v0.59.0           │ 0.60.0        │ net/http: net/http/internal/http2: golang.org/x/net/http2: │
+│                  │                │          │        │                   │               │ net/http: Denial of Service via excessive HTTP/2 SETTINGS  │
+│                  │                │          │        │                   │               │ frames...                                                  │
+│                  │                │          │        │                   │               │ https://avd.aquasec.com/nvd/cve-2026-78669                 │
+└──────────────────┴────────────────┴──────────┴────────┴───────────────────┴───────────────┴────────────────────────────────────────────────────────────┘
+
+usr/share/grafana/data/plugins-bundled/influxdb/gpx_grafana_influxdb_datasource_linux_amd64 (gobinary)
+======================================================================================================
+Total: 5 (HIGH: 5, CRITICAL: 0)
+
+┌──────────────────┬─────────────────┬──────────┬────────┬───────────────────┬─────────────────┬──────────────────────────────────────────────────────────────┐
+│     Library      │  Vulnerability  │ Severity │ Status │ Installed Version │  Fixed Version  │                            Title                             │
+├──────────────────┼─────────────────┼──────────┼────────┼───────────────────┼─────────────────┼──────────────────────────────────────────────────────────────┤
+│ golang.org/x/net │ CVE-2026-78669  │ HIGH     │ fixed  │ v0.58.0           │ 0.60.0          │ net/http: net/http/internal/http2: golang.org/x/net/http2:   │
+│                  │                 │          │        │                   │                 │ net/http: Denial of Service via excessive HTTP/2 SETTINGS    │
+│                  │                 │          │        │                   │                 │ frames...                                                    │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-78669                   │
+├──────────────────┼─────────────────┤          │        ├───────────────────┼─────────────────┼──────────────────────────────────────────────────────────────┤
+│ stdlib           │ CVE-2026-111943 │          │        │ v1.26.7           │ 1.26.10, 1.27.3 │ crypto/x509: golang: crypto/x509: Man-in-the-middle attacks  │
+│                  │                 │          │        │                   │                 │ via untrusted intermediate certificates                      │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-111943                  │
+│                  ├─────────────────┤          │        │                   ├─────────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-78667  │          │        │                   │ 1.26.9, 1.27.2  │ net/http: golang: golang: Denial of Service via crafted HTTP │
+│                  │                 │          │        │                   │                 │ Range headers                                                │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-78667                   │
+│                  ├─────────────────┤          │        │                   │                 ├──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-78669  │          │        │                   │                 │ net/http: net/http/internal/http2: golang.org/x/net/http2:   │
+│                  │                 │          │        │                   │                 │ net/http: Denial of Service via excessive HTTP/2 SETTINGS    │
+│                  │                 │          │        │                   │                 │ frames...                                                    │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-78669                   │
+│                  ├─────────────────┤          │        │                   │                 ├──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-97031  │          │        │                   │                 │ crypto/tls: golang: crypto/tls: Denial of Service via        │
+│                  │                 │          │        │                   │                 │ multiple ECH outer extension references...                   │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-97031                   │
+└──────────────────┴─────────────────┴──────────┴────────┴───────────────────┴─────────────────┴──────────────────────────────────────────────────────────────┘
+
+usr/share/grafana/data/plugins-bundled/jaeger/gpx_grafana-jaeger-datasource_linux_amd64 (gobinary)
+==================================================================================================
+Total: 5 (HIGH: 5, CRITICAL: 0)
+
+┌──────────────────┬─────────────────┬──────────┬────────┬───────────────────┬─────────────────┬──────────────────────────────────────────────────────────────┐
+│     Library      │  Vulnerability  │ Severity │ Status │ Installed Version │  Fixed Version  │                            Title                             │
+├──────────────────┼─────────────────┼──────────┼────────┼───────────────────┼─────────────────┼──────────────────────────────────────────────────────────────┤
+│ golang.org/x/net │ CVE-2026-78669  │ HIGH     │ fixed  │ v0.58.0           │ 0.60.0          │ net/http: net/http/internal/http2: golang.org/x/net/http2:   │
+│                  │                 │          │        │                   │                 │ net/http: Denial of Service via excessive HTTP/2 SETTINGS    │
+│                  │                 │          │        │                   │                 │ frames...                                                    │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-78669                   │
+├──────────────────┼─────────────────┤          │        ├───────────────────┼─────────────────┼──────────────────────────────────────────────────────────────┤
+│ stdlib           │ CVE-2026-111943 │          │        │ v1.26.7           │ 1.26.10, 1.27.3 │ crypto/x509: golang: crypto/x509: Man-in-the-middle attacks  │
+│                  │                 │          │        │                   │                 │ via untrusted intermediate certificates                      │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-111943                  │
+│                  ├─────────────────┤          │        │                   ├─────────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-78667  │          │        │                   │ 1.26.9, 1.27.2  │ net/http: golang: golang: Denial of Service via crafted HTTP │
+│                  │                 │          │        │                   │                 │ Range headers                                                │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-78667                   │
+│                  ├─────────────────┤          │        │                   │                 ├──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-78669  │          │        │                   │                 │ net/http: net/http/internal/http2: golang.org/x/net/http2:   │
+│                  │                 │          │        │                   │                 │ net/http: Denial of Service via excessive HTTP/2 SETTINGS    │
+│                  │                 │          │        │                   │                 │ frames...                                                    │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-78669                   │
+│                  ├─────────────────┤          │        │                   │                 ├──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-97031  │          │        │                   │                 │ crypto/tls: golang: crypto/tls: Denial of Service via        │
+│                  │                 │          │        │                   │                 │ multiple ECH outer extension references...                   │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-97031                   │
+└──────────────────┴─────────────────┴──────────┴────────┴───────────────────┴─────────────────┴──────────────────────────────────────────────────────────────┘
+
+usr/share/grafana/data/plugins-bundled/loki/gpx_grafana-loki-datasource_linux_amd64 (gobinary)
+==============================================================================================
+Total: 5 (HIGH: 5, CRITICAL: 0)
+
+┌──────────────────┬─────────────────┬──────────┬────────┬───────────────────┬─────────────────┬──────────────────────────────────────────────────────────────┐
+│     Library      │  Vulnerability  │ Severity │ Status │ Installed Version │  Fixed Version  │                            Title                             │
+├──────────────────┼─────────────────┼──────────┼────────┼───────────────────┼─────────────────┼──────────────────────────────────────────────────────────────┤
+│ golang.org/x/net │ CVE-2026-78669  │ HIGH     │ fixed  │ v0.58.0           │ 0.60.0          │ net/http: net/http/internal/http2: golang.org/x/net/http2:   │
+│                  │                 │          │        │                   │                 │ net/http: Denial of Service via excessive HTTP/2 SETTINGS    │
+│                  │                 │          │        │                   │                 │ frames...                                                    │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-78669                   │
+├──────────────────┼─────────────────┤          │        ├───────────────────┼─────────────────┼──────────────────────────────────────────────────────────────┤
+│ stdlib           │ CVE-2026-111943 │          │        │ v1.26.7           │ 1.26.10, 1.27.3 │ crypto/x509: golang: crypto/x509: Man-in-the-middle attacks  │
+│                  │                 │          │        │                   │                 │ via untrusted intermediate certificates                      │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-111943                  │
+│                  ├─────────────────┤          │        │                   ├─────────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-78667  │          │        │                   │ 1.26.9, 1.27.2  │ net/http: golang: golang: Denial of Service via crafted HTTP │
+│                  │                 │          │        │                   │                 │ Range headers                                                │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-78667                   │
+│                  ├─────────────────┤          │        │                   │                 ├──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-78669  │          │        │                   │                 │ net/http: net/http/internal/http2: golang.org/x/net/http2:   │
+│                  │                 │          │        │                   │                 │ net/http: Denial of Service via excessive HTTP/2 SETTINGS    │
+│                  │                 │          │        │                   │                 │ frames...                                                    │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-78669                   │
+│                  ├─────────────────┤          │        │                   │                 ├──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-97031  │          │        │                   │                 │ crypto/tls: golang: crypto/tls: Denial of Service via        │
+│                  │                 │          │        │                   │                 │ multiple ECH outer extension references...                   │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-97031                   │
+└──────────────────┴─────────────────┴──────────┴────────┴───────────────────┴─────────────────┴──────────────────────────────────────────────────────────────┘
+
+usr/share/grafana/data/plugins-bundled/mssql/gpx_grafana-mssql-datasource_linux_amd64 (gobinary)
+================================================================================================
+Total: 5 (HIGH: 5, CRITICAL: 0)
+
+┌──────────────────┬─────────────────┬──────────┬────────┬───────────────────┬─────────────────┬──────────────────────────────────────────────────────────────┐
+│     Library      │  Vulnerability  │ Severity │ Status │ Installed Version │  Fixed Version  │                            Title                             │
+├──────────────────┼─────────────────┼──────────┼────────┼───────────────────┼─────────────────┼──────────────────────────────────────────────────────────────┤
+│ golang.org/x/net │ CVE-2026-78669  │ HIGH     │ fixed  │ v0.58.0           │ 0.60.0          │ net/http: net/http/internal/http2: golang.org/x/net/http2:   │
+│                  │                 │          │        │                   │                 │ net/http: Denial of Service via excessive HTTP/2 SETTINGS    │
+│                  │                 │          │        │                   │                 │ frames...                                                    │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-78669                   │
+├──────────────────┼─────────────────┤          │        ├───────────────────┼─────────────────┼──────────────────────────────────────────────────────────────┤
+│ stdlib           │ CVE-2026-111943 │          │        │ v1.26.7           │ 1.26.10, 1.27.3 │ crypto/x509: golang: crypto/x509: Man-in-the-middle attacks  │
+│                  │                 │          │        │                   │                 │ via untrusted intermediate certificates                      │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-111943                  │
+│                  ├─────────────────┤          │        │                   ├─────────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-78667  │          │        │                   │ 1.26.9, 1.27.2  │ net/http: golang: golang: Denial of Service via crafted HTTP │
+│                  │                 │          │        │                   │                 │ Range headers                                                │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-78667                   │
+│                  ├─────────────────┤          │        │                   │                 ├──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-78669  │          │        │                   │                 │ net/http: net/http/internal/http2: golang.org/x/net/http2:   │
+│                  │                 │          │        │                   │                 │ net/http: Denial of Service via excessive HTTP/2 SETTINGS    │
+│                  │                 │          │        │                   │                 │ frames...                                                    │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-78669                   │
+│                  ├─────────────────┤          │        │                   │                 ├──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-97031  │          │        │                   │                 │ crypto/tls: golang: crypto/tls: Denial of Service via        │
+│                  │                 │          │        │                   │                 │ multiple ECH outer extension references...                   │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-97031                   │
+└──────────────────┴─────────────────┴──────────┴────────┴───────────────────┴─────────────────┴──────────────────────────────────────────────────────────────┘
+
+usr/share/grafana/data/plugins-bundled/mysql/gpx_grafana-mysql-datasource_linux_amd64 (gobinary)
+================================================================================================
+Total: 5 (HIGH: 5, CRITICAL: 0)
+
+┌──────────────────┬─────────────────┬──────────┬────────┬───────────────────┬─────────────────┬──────────────────────────────────────────────────────────────┐
+│     Library      │  Vulnerability  │ Severity │ Status │ Installed Version │  Fixed Version  │                            Title                             │
+├──────────────────┼─────────────────┼──────────┼────────┼───────────────────┼─────────────────┼──────────────────────────────────────────────────────────────┤
+│ golang.org/x/net │ CVE-2026-78669  │ HIGH     │ fixed  │ v0.58.0           │ 0.60.0          │ net/http: net/http/internal/http2: golang.org/x/net/http2:   │
+│                  │                 │          │        │                   │                 │ net/http: Denial of Service via excessive HTTP/2 SETTINGS    │
+│                  │                 │          │        │                   │                 │ frames...                                                    │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-78669                   │
+├──────────────────┼─────────────────┤          │        ├───────────────────┼─────────────────┼──────────────────────────────────────────────────────────────┤
+│ stdlib           │ CVE-2026-111943 │          │        │ v1.26.7           │ 1.26.10, 1.27.3 │ crypto/x509: golang: crypto/x509: Man-in-the-middle attacks  │
+│                  │                 │          │        │                   │                 │ via untrusted intermediate certificates                      │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-111943                  │
+│                  ├─────────────────┤          │        │                   ├─────────────────┼──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-78667  │          │        │                   │ 1.26.9, 1.27.2  │ net/http: golang: golang: Denial of Service via crafted HTTP │
+│                  │                 │          │        │                   │                 │ Range headers                                                │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-78667                   │
+│                  ├─────────────────┤          │        │                   │                 ├──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-78669  │          │        │                   │                 │ net/http: net/http/internal/http2: golang.org/x/net/http2:   │
+│                  │                 │          │        │                   │                 │ net/http: Denial of Service via excessive HTTP/2 SETTINGS    │
+│                  │                 │          │        │                   │                 │ frames...                                                    │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-78669                   │
+│                  ├─────────────────┤          │        │                   │                 ├──────────────────────────────────────────────────────────────┤
+│                  │ CVE-2026-97031  │          │        │                   │                 │ crypto/tls: golang: crypto/tls: Denial of Service via        │
+│                  │                 │          │        │                   │                 │ multiple ECH outer extension references...                   │
+│                  │                 │          │        │                   │                 │ https://avd.aquasec.com/nvd/cve-2026-97031                   │
+└──────────────────┴─────────────────┴──────────┴────────┴───────────────────┴─────────────────┴──────────────────────────────────────────────────────────────┘
+
+usr/share/grafana/data/plugins-bundled/opentsdb/gpx_grafana-opentsdb-datasource_linux_amd64 (gobinary)
+======================================================================================================
+Total: 1 (HIGH: 1, CRITICAL: 0)
+
+┌──────────────────┬────────────────┬──────────┬────────┬───────────────────┬───────────────┬────────────────────────────────────────────────────────────┐
+│     Library      │ Vulnerability  │ Severity │ Status │ Installed Version │ Fixed Version │                           Title                            │
+├──────────────────┼────────────────┼──────────┼────────┼───────────────────┼───────────────┼────────────────────────────────────────────────────────────┤
+│ golang.org/x/net │ CVE-2026-78669 │ HIGH     │ fixed  │ v0.58.0           │ 0.60.0        │ net/http: net/http/internal/http2: golang.org/x/net/http2: │
+│                  │                │          │        │                   │               │ net/http: Denial of Service via excessive HTTP/2 SETTINGS  │
+│                  │                │          │        │                   │               │ frames...                                                  │
+│                  │                │          │        │                   │               │ https://avd.aquasec.com/nvd/cve-2026-78669                 │
+└──────────────────┴────────────────┴──────────┴────────┴───────────────────┴───────────────┴────────────────────────────────────────────────────────────┘
+
+usr/share/grafana/data/plugins-bundled/tempo/gpx_grafana-tempo-datasource_linux_amd64 (gobinary)
+================================================================================================
+Total: 2 (HIGH: 2, CRITICAL: 0)
+
+┌──────────────────────────┬────────────────┬──────────┬────────┬──────────────────────────────────────┬──────────────────────┬────────────────────────────────────────────────────────────┐
+│         Library          │ Vulnerability  │ Severity │ Status │          Installed Version           │    Fixed Version     │                           Title                            │
+├──────────────────────────┼────────────────┼──────────┼────────┼──────────────────────────────────────┼──────────────────────┼────────────────────────────────────────────────────────────┤
+│ github.com/grafana/tempo │ CVE-2026-21728 │ HIGH     │ fixed  │ v1.5.1-0.20260910130453-bcfe9f230c1d │ 2.8.4, 2.9.2, 2.10.2 │ grafana/tempo: Tempo: Denial of Service via large queries  │
+│                          │                │          │        │                                      │                      │ https://avd.aquasec.com/nvd/cve-2026-21728                 │
+│                          ├────────────────┤          │        │                                      ├──────────────────────┼────────────────────────────────────────────────────────────┤
+│                          │ CVE-2026-28377 │          │        │                                      │ 2.10.3               │ Grafana Tempo: Grafana Tempo: Information disclosure of S3 │
+│                          │                │          │        │                                      │                      │ encryption key via status...                               │
+│                          │                │          │        │                                      │                      │ https://avd.aquasec.com/nvd/cve-2026-28377                 │
+└──────────────────────────┴────────────────┴──────────┴────────┴──────────────────────────────────────┴──────────────────────┴────────────────────────────────────────────────────────────┘
+ 
+=== regression: proxy health (via caddy) 
+{"status": "ok", "uptime_seconds": 285.121, "database": {"reachable": true}, "upstream": {"reachable": true}, "blocklist": {"domains": 77760, "version": 2, "last_update": "2026-11-04 21:15:58"}, "queue": {"depth": 0, "dropped_events": 0}} 
+=== regression: 401 without token 
+HTTP_STATUS=%{http_code}
+=== regression retry: 401 without token 
+https://localhost/api/v1/stats/summary without token -> HTTP 401
+=== regression retry: 200 with read token 
+with read token -> HTTP 200
