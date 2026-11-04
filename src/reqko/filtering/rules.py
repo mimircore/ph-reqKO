@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Callable
 
 from reqko.filtering.engine import FilterEngine, FilterSnapshot
 from reqko.filtering.parser import normalize_domain
@@ -30,6 +31,9 @@ class RuleManager:
         self._custom_blocks: set[str] = set()
         self._version = engine.snapshot.version
         self.last_update: str | None = None
+        # Optional callback invoked with the new rule count after every
+        # snapshot swap (used to update the dns_active_rules_count gauge).
+        self.on_rules_changed: Callable[[int], None] | None = None
 
     # ── startup / persistence ─────────────────────────────────────────────────
 
@@ -85,6 +89,11 @@ class RuleManager:
             rules_count=0,  # auto-computed from the merged sets
         )
         self._engine.update_snapshot(snapshot)
+        if self.on_rules_changed is not None:
+            try:
+                self.on_rules_changed(snapshot.rules_count)
+            except Exception:  # pragma: no cover - metrics must never break rules
+                logger.debug("on_rules_changed callback failed", exc_info=True)
         logger.info(
             "Filter rules v%d: %d rules (%d base + %d custom)",
             snapshot.version,
