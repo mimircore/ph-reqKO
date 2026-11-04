@@ -28,6 +28,9 @@ reqko = "reqko.__main__:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+reqko = ["web/*", "storage/*.sql"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"

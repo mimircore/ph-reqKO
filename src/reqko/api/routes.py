@@ -11,11 +11,13 @@ import datetime
 import logging
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, TypeVar
 
 from aiohttp import web
 
 from reqko.api.app import (
+    PANEL_CSP,
     PROBE_CACHE_TTL,
     STATE_KEY,
     ApiProblem,
@@ -26,6 +28,15 @@ from reqko.dns.upstream import probe_upstream
 from reqko.filtering.updater import update_filter_engine
 
 logger = logging.getLogger(__name__)
+
+# ── web panel static assets (FR-18) ────────────────────────────────────────────
+# Fixed whitelist of filenames: no directory traversal is possible, and the
+# files themselves contain no data (the panel fetches the API client-side).
+PANEL_DIR = Path(__file__).resolve().parent.parent / "web"
+PANEL_ASSETS: dict[str, str] = {
+    "panel.js": "application/javascript",
+    "panel.css": "text/css",
+}
 
 _T = TypeVar("_T")
 
@@ -510,12 +521,41 @@ async def handle_blocklists_update(request: web.Request) -> web.Response:
     )
 
 
+# ── web panel (FR-18) ──────────────────────────────────────────────────────────
+
+
+def _panel_response(name: str, content_type: str) -> web.Response:
+    path = PANEL_DIR / name
+    try:
+        body = path.read_bytes()
+    except OSError:
+        raise ApiProblem(404, "Not Found", detail="Panel asset is missing.") from None
+    response = web.Response(body=body, content_type=content_type)
+    # Stricter CSP for the panel page and its assets (API keeps its own).
+    response.headers["Content-Security-Policy"] = PANEL_CSP
+    return response
+
+
+async def handle_panel_index(request: web.Request) -> web.Response:
+    return _panel_response("index.html", "text/html")
+
+
+async def handle_panel_asset(request: web.Request) -> web.Response:
+    name = request.match_info["asset"]
+    content_type = PANEL_ASSETS.get(name)
+    if content_type is None:
+        raise ApiProblem(404, "Not Found", detail="Unknown panel asset.")
+    return _panel_response(name, content_type)
+
+
 # ── registration ───────────────────────────────────────────────────────────────
 
 
 def register_routes(app: web.Application) -> None:
     app.router.add_get("/health", handle_health)
     app.router.add_get("/ready", handle_ready)
+    app.router.add_get("/panel", handle_panel_index)
+    app.router.add_get("/panel/{asset}", handle_panel_asset)
     app.router.add_get("/api/v1/stats/summary", handle_stats_summary)
     app.router.add_get("/api/v1/stats/timeseries", handle_stats_timeseries)
     app.router.add_get("/api/v1/stats/top-domains", handle_stats_top_domains)

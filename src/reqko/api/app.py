@@ -21,6 +21,9 @@ from reqko.filtering.rules import RuleManager
 PROBE_CACHE_TTL = 10.0
 
 PUBLIC_PATHS = frozenset({"/health", "/ready"})
+# Everything under /panel is public static content: the files contain no
+# data and fetch it client-side with the user's Bearer token.
+PUBLIC_PREFIXES = ("/panel",)
 
 SECURITY_HEADERS: dict[str, str] = {
     "X-Content-Type-Options": "nosniff",
@@ -29,6 +32,12 @@ SECURITY_HEADERS: dict[str, str] = {
     "Referrer-Policy": "no-referrer",
     "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
 }
+
+# The panel needs to load its own script/style and call the API on this origin
+PANEL_CSP = (
+    "default-src 'none'; script-src 'self'; style-src 'self'; "
+    "connect-src 'self'; frame-ancestors 'none'"
+)
 
 # Signature of the next middleware/handler in the aiohttp chain
 Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
@@ -121,7 +130,7 @@ async def auth_middleware(request: web.Request, handler: Handler) -> web.StreamR
     - Failed attempts are rate limited per client IP (429).
     """
     state: ApiState = request.app[STATE_KEY]
-    if request.path in PUBLIC_PATHS:
+    if request.path in PUBLIC_PATHS or request.path.startswith(PUBLIC_PREFIXES):
         return await handler(request)
 
     peer = request.remote or "unknown"
