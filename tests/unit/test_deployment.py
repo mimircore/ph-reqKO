@@ -226,3 +226,148 @@ def test_caddyfile_tls_internal_and_security_headers() -> None:
 def test_wireguard_image_pinned() -> None:
     image = _COMPOSE["services"]["wireguard"]["image"]
     assert image == "linuxserver/wireguard:1.0.20260223"
+
+
+# ── observability services (NFR-07) ────────────────────────────────────────────
+
+_PROMETHEUS = _COMPOSE["services"]["prometheus"]
+_GRAFANA = _COMPOSE["services"]["grafana"]
+
+# Metrics the exporter (src/reqko/metrics/exporter.py) actually defines,
+# plus `up` which Prometheus itself generates.
+_EXPORTER_METRICS = frozenset(
+    {
+        "dns_queries_total",
+        "dns_blocked_queries_total",
+        "dns_query_duration_seconds_bucket",
+        "dns_query_duration_seconds_sum",
+        "dns_query_duration_seconds_count",
+        "dns_cache_hits_total",
+        "dns_cache_misses_total",
+        "dns_active_rules_count",
+        "dns_dropped_logs_total",
+        "process_resident_memory_bytes",
+        "up",
+    }
+)
+
+
+def test_prometheus_pinned_and_not_published() -> None:
+    assert _PROMETHEUS["image"] == "prom/prometheus:v3.15.1"
+    assert _PROMETHEUS.get("ports") is None  # must NOT be published
+    assert _PROMETHEUS["networks"] == ["backend"]
+
+
+def test_prometheus_hardening_and_config() -> None:
+    assert _PROMETHEUS["read_only"] is True
+    assert "ALL" in _PROMETHEUS["cap_drop"]
+    assert "no-new-privileges:true" in _PROMETHEUS["security_opt"]
+    assert _PROMETHEUS["pids_limit"] > 0
+    command = " ".join(_PROMETHEUS["command"])
+    assert "--config.file=/etc/prometheus/prometheus.yml" in command
+    assert "--storage.tsdb.retention.time=" in command
+    # Prometheus v3 defaults admin API/lifecycle to OFF and its flag parser
+    # rejects the "--flag=false" syntax ("unexpected false"): the flags must
+    # be omitted, not set to false.
+    assert "--web.enable-admin-api" not in command
+    assert "--web.enable-lifecycle" not in command
+    volumes = _PROMETHEUS["volumes"]
+    assert any("prometheus.yml" in v and ":ro" in v for v in volumes)
+    assert "prometheus-data:/prometheus" in volumes
+    assert "prometheus-data" in _COMPOSE["volumes"]
+
+
+def test_prometheus_scrapes_reqko_by_service_name() -> None:
+    config = yaml.safe_load(
+        (_ROOT / "docker" / "prometheus" / "prometheus.yml").read_text(encoding="utf-8")
+    )
+    jobs = config["scrape_configs"]
+    assert len(jobs) == 1
+    assert jobs[0]["job_name"] == "reqko"
+    assert jobs[0]["metrics_path"] == "/metrics"
+    assert jobs[0]["static_configs"][0]["targets"] == ["reqko:9100"]
+
+
+def test_grafana_pinned_and_hardened() -> None:
+    assert _GRAFANA["image"] == "grafana/grafana:13.3.0"
+    assert _GRAFANA["read_only"] is True
+    assert "ALL" in _GRAFANA["cap_drop"]
+    assert "no-new-privileges:true" in _GRAFANA["security_opt"]
+    assert _GRAFANA["pids_limit"] > 0
+    env = _GRAFANA["environment"]
+    assert ":?" in env["GF_SECURITY_ADMIN_PASSWORD"]
+    assert env["GF_USERS_ALLOW_SIGN_UP"] == "false"
+    assert env["GF_AUTH_ANONYMOUS_ENABLED"] == "false"
+    assert env["GF_ANALYTICS_REPORTING_ENABLED"] == "false"
+    assert env["GF_ANALYTICS_CHECK_FOR_UPDATES"] == "false"
+    assert "grafana-data:/var/lib/grafana" in _GRAFANA["volumes"]
+    assert "grafana-data" in _COMPOSE["volumes"]
+
+
+def test_grafana_published_loopback_only_via_edge() -> None:
+    ports = _GRAFANA["ports"]
+    assert ports == ["${GRAFANA_BIND:-127.0.0.1}:${GRAFANA_PORT:-3000}:3000"]
+    networks = _GRAFANA["networks"]
+    assert "backend" in networks
+    assert "edge" in networks  # publishing requires a non-internal network
+    assert "internal" not in _COMPOSE["networks"]["edge"]
+
+
+def test_grafana_provisioning_files_exist_and_parse() -> None:
+    ds = yaml.safe_load(
+        (
+            _ROOT / "docker" / "grafana" / "provisioning" / "datasources" / "prometheus.yml"
+        ).read_text(encoding="utf-8")
+    )
+    datasource = ds["datasources"][0]
+    assert datasource["type"] == "prometheus"
+    assert datasource["uid"] == "prometheus"
+    assert datasource["url"] == "http://prometheus:9090"
+
+    provider = yaml.safe_load(
+        (
+            _ROOT / "docker" / "grafana" / "provisioning" / "dashboards" / "provider.yml"
+        ).read_text(encoding="utf-8")
+    )
+    assert provider["providers"][0]["options"]["path"] == "/var/lib/grafana/dashboards"
+
+
+def test_dashboard_json_valid_and_uses_known_metrics_only() -> None:
+    import json
+
+    dashboard = json.loads(
+        (_ROOT / "docker" / "grafana" / "dashboards" / "reqko.json").read_text(encoding="utf-8")
+    )
+    assert dashboard["uid"] == "reqko-overview"
+    assert dashboard["title"] == "ph-reqKO overview"
+
+    exprs: list[str] = []
+    for panel in dashboard["panels"]:
+        assert panel["datasource"]["uid"] == "prometheus"
+        for target in panel.get("targets", []):
+            exprs.append(target["expr"])
+
+    assert any("histogram_quantile" in e for e in exprs)  # latency quantiles panel
+
+    referenced = set()
+    for expr in exprs:
+        referenced.update(re.findall(r"\b(dns_[a-z_]+|process_resident_memory_bytes|up)\b", expr))
+    unknown = referenced - _EXPORTER_METRICS
+    assert not unknown, f"dashboard references undefined metrics: {unknown}"
+
+
+def test_metrics_not_published_by_reqko() -> None:
+    """The metrics endpoint (9100) must be reachable only inside backend."""
+    env = _COMPOSE["services"]["reqko"]["environment"]
+    # bind all interfaces inside the container so Prometheus can scrape
+    assert env["REQKO_METRICS_HOST"] == "0.0.0.0"
+    assert env["REQKO_METRICS_PORT"] == "9100"
+    for port in _COMPOSE["services"]["reqko"].get("ports", []):
+        assert ":9100" not in port, f"metrics port published: {port}"
+
+
+def test_env_example_has_observability_keys() -> None:
+    env_example = (_ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "GRAFANA_ADMIN_PASSWORD=" in env_example
+    assert "GRAFANA_BIND=127.0.0.1" in env_example
+    assert "GRAFANA_PORT=3000" in env_example

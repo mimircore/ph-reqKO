@@ -30,6 +30,11 @@ services:
       # deliberately NOT published to the host
       REQKO_API_HOST: 0.0.0.0
       REQKO_API_PORT: "8080"
+      # Metrics endpoint: bind all interfaces inside the container so
+      # Prometheus (backend network) can scrape; NOT published to the host.
+      # The app ACL (REQKO_ALLOWED_NETWORKS) guards who may scrape.
+      REQKO_METRICS_HOST: 0.0.0.0
+      REQKO_METRICS_PORT: "9100"
       # Keep the DNS ACL on: the default is private ranges only
       REQKO_ALLOWED_NETWORKS: ${REQKO_ALLOWED_NETWORKS:-127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1/128,fe80::/10}
       REQKO_RATE_LIMIT_RPS: ${REQKO_RATE_LIMIT_RPS:-100}
@@ -117,6 +122,72 @@ services:
       - backend
       - edge
 
+  # ── Observability (NFR-07) ──────────────────────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:v3.15.1
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
+      # NOTE: --web.enable-admin-api / --web.enable-lifecycle are NOT set:
+      # they default to off in Prometheus v3, and the v3 flag parser rejects
+      # the --flag=false syntax ("unexpected false")
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      # backend only: scrapes reqko:9100 over the internal network and is
+      # deliberately NOT published to the host
+      - backend
+
+  grafana:
+    image: grafana/grafana:13.3.0
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1.0
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD in .env (copy .env.example)}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: "false"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      # Published only on loopback by default (see GRAFANA_BIND/GRAFANA_PORT
+      # in .env.example); edge is non-internal, so Grafana technically has
+      # egress - an accepted residual exposure for the dashboard host port.
+      - "${GRAFANA_BIND:-127.0.0.1}:${GRAFANA_PORT:-3000}:3000"
+    networks:
+      - backend
+      - edge
+    depends_on:
+      - prometheus
+
 networks:
   # internal: true -> no direct internet access; proxy <-> reqko only
   backend:
@@ -126,8 +197,10 @@ networks:
         - subnet: 172.28.0.0/24
   # reqko also needs egress for upstream DNS and blocklist URL refresh
   upstream: {}
-  # non-internal network for published ports (443, 51820/udp)
+  # non-internal network for published ports (443, 51820/udp, 3000)
   edge: {}
 
 volumes:
   reqko-data:
+  prometheus-data:
+  grafana-data:
