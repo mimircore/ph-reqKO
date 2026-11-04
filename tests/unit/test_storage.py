@@ -60,6 +60,81 @@ def test_migrations_are_idempotent() -> None:
     assert count == 1
 
 
+def test_migration_v1_to_v2_adds_latency_columns() -> None:
+    """A database created by schema v1 is upgraded in place, keeping its data."""
+    conn = get_db_connection(":memory:")
+    # Recreate the OLD v1 stats_hourly shape (no latency columns)
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            description TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS stats_hourly (
+            bucket_timestamp TIMESTAMP NOT NULL PRIMARY KEY,
+            total_queries INTEGER NOT NULL DEFAULT 0,
+            blocked_queries INTEGER NOT NULL DEFAULT 0,
+            cached_queries INTEGER NOT NULL DEFAULT 0,
+            forwarded_queries INTEGER NOT NULL DEFAULT 0,
+            allowed_queries INTEGER NOT NULL DEFAULT 0,
+            refused_queries INTEGER NOT NULL DEFAULT 0,
+            error_queries INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO schema_migrations (version, description) VALUES (1, 'v1');
+        INSERT INTO stats_hourly (bucket_timestamp, total_queries, blocked_queries)
+            VALUES ('2026-01-01 10:00:00', 42, 7);
+        """
+    )
+    conn.commit()
+
+    apply_migrations(conn)
+
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(stats_hourly)")}
+    assert "latency_sum" in cols
+    assert "latency_samples" in cols
+
+    versions = [
+        row[0] for row in conn.execute("SELECT version FROM schema_migrations ORDER BY version")
+    ]
+    assert versions == [1, 2]
+
+    # Existing aggregates survive the migration
+    row = conn.execute(
+        "SELECT total_queries, blocked_queries, latency_sum, latency_samples "
+        "FROM stats_hourly WHERE bucket_timestamp = '2026-01-01 10:00:00'"
+    ).fetchone()
+    assert row is not None
+    assert row["total_queries"] == 42
+    assert row["blocked_queries"] == 7
+    assert row["latency_sum"] == 0
+    assert row["latency_samples"] == 0
+
+    # The writer's UPSERT works against the migrated table
+    conn.execute(
+        """
+        INSERT INTO stats_hourly (
+            bucket_timestamp, total_queries, blocked_queries, cached_queries,
+            forwarded_queries, allowed_queries, refused_queries, error_queries,
+            latency_sum, latency_samples
+        ) VALUES ('2026-01-01 10:00:00', 8, 0, 8, 0, 0, 0, 0, 12.5, 8)
+        ON CONFLICT(bucket_timestamp) DO UPDATE SET
+            total_queries = total_queries + excluded.total_queries,
+            latency_sum = latency_sum + excluded.latency_sum,
+            latency_samples = latency_samples + excluded.latency_samples
+        """,
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT total_queries, latency_sum, latency_samples FROM stats_hourly "
+        "WHERE bucket_timestamp = '2026-01-01 10:00:00'"
+    ).fetchone()
+    assert row is not None
+    assert row["total_queries"] == 50
+    assert row["latency_sum"] == 12.5
+    assert row["latency_samples"] == 8
+
+
 def test_query_log_accepts_all_valid_statuses() -> None:
     conn = init_database(":memory:")
     with conn:

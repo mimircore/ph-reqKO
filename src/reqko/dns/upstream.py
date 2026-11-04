@@ -8,12 +8,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import struct
 from collections.abc import Sequence
 
 from reqko.dns.protocol import (
     RCODE_SERVFAIL,
+    TYPE_NS,
+    DNSHeader,
     DNSPacket,
+    DNSQuestion,
     make_response,
     parse_wire,
 )
@@ -177,3 +181,28 @@ async def query_upstream(
 def make_servfail(request: DNSPacket) -> DNSPacket:
     """Creates a SERVFAIL response for when all upstreams are unavailable."""
     return make_response(request, rcode=RCODE_SERVFAIL)
+
+
+async def probe_upstream(
+    upstreams: Sequence[tuple[str, int]],
+    timeout: float = 1.0,
+) -> bool:
+    """Lightweight reachability probe for GET /health (FR-16).
+
+    Sends a root NS query to the first upstream that answers; returns True
+    on any response and False when all upstreams are unreachable.
+    """
+    if not upstreams:
+        return False
+    query = DNSPacket(
+        header=DNSHeader(id=random.getrandbits(16), qr=0, rd=0),
+        questions=[DNSQuestion(name="", qtype=TYPE_NS)],
+    )
+    wire = query.to_wire()
+    for host, port in upstreams:
+        try:
+            await _send_udp_query(wire, host, port, timeout)
+            return True
+        except Exception:
+            continue
+    return False

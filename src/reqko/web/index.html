@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ph-reqKO — stats panel</title>
+  <link rel="stylesheet" href="/panel/panel.css">
+  <script src="/panel/panel.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <h1>ph-reqKO</h1>
+    <span id="refresh-status" class="muted" aria-live="polite"></span>
+  </header>
+
+  <section id="token-gate" class="card gate" hidden>
+    <h2>API token required</h2>
+    <p class="muted">Enter an API token with the read scope. It is kept in
+      <code>sessionStorage</code> only and never leaves this browser tab except
+      as a Bearer header to this server.</p>
+    <form id="token-form">
+      <label for="token-input">Bearer token</label>
+      <input id="token-input" type="password" autocomplete="off" spellcheck="false">
+      <button type="submit">Show stats</button>
+    </form>
+    <p id="token-error" class="error" hidden></p>
+  </section>
+
+  <main id="dashboard" hidden>
+    <section id="tiles" class="tiles">
+      <div class="tile"><span class="tile-label">Total queries</span><span class="tile-value" id="tile-total">–</span></div>
+      <div class="tile"><span class="tile-label">Blocked</span><span class="tile-value" id="tile-blocked">–</span></div>
+      <div class="tile"><span class="tile-label">Cache hit</span><span class="tile-value" id="tile-cache">–</span></div>
+      <div class="tile"><span class="tile-label">Avg latency</span><span class="tile-value" id="tile-latency">–</span></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>Queries over time</h2>
+        <div class="toggle" role="group" aria-label="Time bucket">
+          <button type="button" id="btn-hour" class="active">Hour</button>
+          <button type="button" id="btn-day">Day</button>
+        </div>
+      </div>
+      <canvas id="chart-timeseries" aria-label="Total versus blocked queries over time"></canvas>
+      <p id="error-timeseries" class="error" hidden></p>
+    </section>
+
+    <div class="grid">
+      <section class="card">
+        <h2>Top blocked domains</h2>
+        <canvas id="chart-top-domains" aria-label="Top blocked domains"></canvas>
+        <p id="error-top-domains" class="error" hidden></p>
+      </section>
+      <section class="card">
+        <h2>Top clients</h2>
+        <canvas id="chart-top-clients" aria-label="Top clients"></canvas>
+        <p id="error-top-clients" class="error" hidden></p>
+      </section>
+    </div>
+  </main>
+
+  <p id="global-error" class="error" role="alert" hidden></p>
+</body>
+</html>
