@@ -138,9 +138,13 @@ docker compose ps
   [docs/06-remote-access.md](docs/06-remote-access.md).
 - **DNS:** point a LAN client at the host's port 53 (default bind is `127.0.0.1` — change
   `REQKO_DNS_BIND` in `.env` to your LAN IP to serve the network; keep the ACL and rate limit on).
+- **Blocklist (first start):** the fresh volume is empty, so seed it once and reload:
+  `docker compose exec reqko sh -c "printf 'ads.example.com\ndoubleclick.net\n' > /data/blocklist.txt"`
+  then `POST https://localhost/api/v1/blocklists/update` with the admin token (or restart).
 - **Remote access:** the intended path is the optional WireGuard profile
-  (`docker compose --profile vpn up -d`) — nothing exposed publicly; see
-  [docs/06-remote-access.md](docs/06-remote-access.md) (threat model and peer setup).
+  (`docker compose --profile vpn up -d`; listens on `127.0.0.1:51820/udp` by default) —
+  nothing exposed publicly; VPN clients use `172.28.0.10:53` (fixed address) as their DNS —
+  see [docs/06-remote-access.md](docs/06-remote-access.md) (threat model and peer setup).
 
 ## Demo
 
