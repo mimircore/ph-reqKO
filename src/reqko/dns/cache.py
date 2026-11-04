@@ -36,6 +36,10 @@ class CacheEntry:
     expires_at: float
     is_negative: bool
     original_ttl: int
+    # The clamped TTL as an exact integer. Storing it separately avoids
+    # reconstructing it as expires_at - created_at, which is subject to
+    # float rounding (e.g. 119.99999999999997 for a 120 s entry).
+    ttl: int
 
     def remaining_ttl(self, now: float) -> int:
         return max(0, int(self.expires_at - now))
@@ -144,6 +148,7 @@ class DNSCache:
             expires_at=expires_at,
             is_negative=is_negative,
             original_ttl=original_ttl,
+            ttl=clamped_ttl,
         )
 
         key = (norm_qname, qtype)

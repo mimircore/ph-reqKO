@@ -1,5 +1,7 @@
 """Unit tests for DNSCache (FR-03, FR-04, FR-09)."""
 
+import pytest
+
 from reqko.dns.cache import DNSCache
 from reqko.dns.protocol import (
     CLASS_IN,
@@ -77,7 +79,10 @@ def test_cache_ttl_clamping() -> None:
     )
     entry_small = cache.set("fast.com", TYPE_A, packet_small)
     assert entry_small is not None
-    assert entry_small.expires_at - entry_small.created_at == 60
+    # The clamped TTL is stored as an exact integer field; the float
+    # difference expires_at - created_at is only approximately equal.
+    assert entry_small.ttl == 60
+    assert entry_small.expires_at - entry_small.created_at == pytest.approx(60)
 
     # Response with huge TTL (86400s) should be clamped down to max_ttl (1000s)
     packet_large = DNSPacket(
@@ -94,7 +99,7 @@ def test_cache_ttl_clamping() -> None:
     )
     entry_large = cache.set("slow.com", TYPE_A, packet_large)
     assert entry_large is not None
-    assert entry_large.expires_at - entry_large.created_at == 1000
+    assert entry_large.ttl == 1000
 
 
 def test_negative_caching_rfc2308() -> None:
@@ -124,7 +129,7 @@ def test_negative_caching_rfc2308() -> None:
     entry = cache.set("nonexistent.domain.org", TYPE_A, nx_packet)
     assert entry is not None
     assert entry.is_negative is True
-    assert entry.expires_at - entry.created_at == 120
+    assert entry.ttl == 120
 
 
 def test_lru_eviction() -> None:

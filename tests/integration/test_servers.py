@@ -52,13 +52,28 @@ async def _start_resolver(
         upstream_timeout=upstream_timeout,
         block_mode=block_mode,
     )
-    udp_transport, tcp_server = await run_dns_servers(
-        cfg,
-        "127.0.0.1",
-        0,
-        tcp_max_connections=tcp_max_connections,
-        tcp_idle_timeout=tcp_idle_timeout,
-    )
+    # Windows can hand out an ephemeral UDP port that falls into a TCP
+    # excluded-port range (Hyper-V/WinNAT): retry on a fresh ephemeral port.
+    # run_dns_servers closes the UDP transport when the TCP bind fails.
+    udp_transport: asyncio.DatagramTransport | None = None
+    tcp_server: asyncio.Server | None = None
+    last_exc: Exception | None = None
+    for _attempt in range(5):
+        try:
+            udp_transport, tcp_server = await run_dns_servers(
+                cfg,
+                "127.0.0.1",
+                0,
+                tcp_max_connections=tcp_max_connections,
+                tcp_idle_timeout=tcp_idle_timeout,
+            )
+            break
+        except OSError as exc:
+            last_exc = exc
+            await asyncio.sleep(0.01)
+    if udp_transport is None or tcp_server is None:
+        raise OSError(f"Could not bind resolver after 5 attempts: {last_exc}")
+
     sock = udp_transport.get_extra_info("socket")
     assert sock is not None
     port = sock.getsockname()[1]

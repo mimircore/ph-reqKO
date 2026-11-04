@@ -470,13 +470,48 @@ async def test_first_response_ttl_matches_cached_ttl() -> None:
 
     entry = cache.get("ttl.example.com", TYPE_A)
     assert entry is not None
-    assert entry.expires_at - entry.created_at == 60
+    assert entry.ttl == 60
 
     # Advance the mock clock: the cache hit TTL must decrease
     current_time += 10.0
     raw2 = _make_a_query("ttl.example.com", qid=2)
     resp2 = parse_wire(await process_query(raw2, "127.0.0.1", cfg))
     assert resp2.answers[0].ttl == 50
+
+
+async def test_first_response_ttl_exact_with_inexact_mock_clock() -> None:
+    """With a clock value that is not exactly float-representable, the first
+    forwarded response TTL must equal the clamped cache TTL exactly.
+
+    Regression guard for deriving the response TTL from
+    int(entry.expires_at - entry.created_at), which can truncate
+    59.99999999999997 down to 59.
+    """
+    current_time = 93.451267687
+
+    def mock_clock() -> float:
+        return current_time
+
+    cache = DNSCache(clock=mock_clock, min_ttl=60, max_ttl=3600)
+    cfg = _make_cfg(cache=cache)
+    assert cfg.cache._clock is mock_clock
+
+    raw = _make_a_query("exact-ttl.example.com")
+    req_pkt = parse_wire(raw)
+    # Upstream TTL 45 is below min_ttl 60 -> clamped to exactly 60
+    fake_resp = _make_upstream_response(req_pkt.header.id, "exact-ttl.example.com", "1.2.3.4", ttl=45)
+
+    with patch(
+        "reqko.dns.pipeline.query_upstream",
+        new=AsyncMock(return_value=(fake_resp, "upstream.test:53")),
+    ):
+        resp1 = parse_wire(await process_query(raw, "127.0.0.1", cfg))
+
+    assert resp1.answers[0].ttl == 60
+
+    entry = cache.get("exact-ttl.example.com", TYPE_A)
+    assert entry is not None
+    assert entry.ttl == 60
 
 
 # ── STEP 2b: allowlist priority regressions (FR-06 vs FR-04/FR-09) ────────────

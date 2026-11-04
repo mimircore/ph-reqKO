@@ -326,7 +326,7 @@ async def process_query(
     _sanitize_edns(request, upstream_resp)
     entry = cfg.cache.set(qname, qtype, upstream_resp)
     if entry is not None:
-        _clamp_response_ttls(upstream_resp, int(entry.expires_at - entry.created_at))
+        _clamp_response_ttls(upstream_resp, entry.ttl)
 
     # ── Step 11: Respond ──────────────────────────────────────────────────────
     status = "ALLOWED" if is_whitelisted else "FORWARDED"

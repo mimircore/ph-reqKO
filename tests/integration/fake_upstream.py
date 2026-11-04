@@ -56,19 +56,33 @@ class FakeUpstreamServer:
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
-        self._udp_transport, _ = await loop.create_datagram_endpoint(
-            lambda: _FakeUDPProtocol(self), local_addr=("127.0.0.1", 0)
-        )
-        sock = self._udp_transport.get_extra_info("socket")
-        assert sock is not None
-        self.udp_port = sock.getsockname()[1]
+        last_exc: Exception | None = None
+        for _attempt in range(5):
+            self._udp_transport, _ = await loop.create_datagram_endpoint(
+                lambda: _FakeUDPProtocol(self), local_addr=("127.0.0.1", 0)
+            )
+            sock = self._udp_transport.get_extra_info("socket")
+            assert sock is not None
+            self.udp_port = sock.getsockname()[1]
 
-        # Real upstream DNS servers serve UDP and TCP on the SAME port;
-        # the resolver's TC=1 TCP fallback connects to the UDP port.
-        self._tcp_server = await asyncio.start_server(
-            lambda r, w: self._handle_tcp(r, w), "127.0.0.1", self.udp_port
-        )
-        self.tcp_port = self.udp_port
+            # Real upstream DNS servers serve UDP and TCP on the SAME port;
+            # the resolver's TC=1 TCP fallback connects to the UDP port.
+            try:
+                self._tcp_server = await asyncio.start_server(
+                    lambda r, w: self._handle_tcp(r, w), "127.0.0.1", self.udp_port
+                )
+            except OSError as exc:
+                # Windows can hand out an ephemeral UDP port that falls into
+                # a TCP excluded-port range (Hyper-V/WinNAT): retry on a
+                # fresh ephemeral port.
+                self._udp_transport.close()
+                self._udp_transport = None
+                last_exc = exc
+                await asyncio.sleep(0.01)
+                continue
+            self.tcp_port = self.udp_port
+            return
+        raise OSError(f"Could not bind fake upstream after 5 attempts: {last_exc}")
 
     async def stop(self) -> None:
         if self._udp_transport is not None:

@@ -114,11 +114,16 @@ async def run_dns_servers(
         async with semaphore:
             await _handle_tcp_client(reader, writer, cfg, idle_timeout=tcp_idle_timeout)
 
-    tcp_server = await asyncio.start_server(
-        _limited_tcp_handler,
-        dns_host,
-        dns_port,
-    )
+    try:
+        tcp_server = await asyncio.start_server(
+            _limited_tcp_handler,
+            dns_host,
+            dns_port,
+        )
+    except Exception:
+        # Do not leak the already-bound UDP transport when TCP cannot bind
+        udp_transport.close()
+        raise
 
     logger.info("DNS UDP+TCP listening on %s:%d", dns_host, dns_port)
     return udp_transport, tcp_server
