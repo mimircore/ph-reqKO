@@ -29,7 +29,7 @@ reqko = "reqko.__main__:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-reqko = ["web/*", "storage/*.sql"]
+reqko = ["web/*", "storage/*.sql", "api/data/*"]
 
 [tool.ruff]
 line-length = 100

@@ -843,7 +843,7 @@ async def test_extension_rules_etag_304_and_limit_truncation() -> None:
         assert resp3.headers["ETag"] != etag
 
         # limit validation
-        for query in ("limit=0", "limit=30001", "limit=abc"):
+        for query in ("limit=0", "limit=100001", "limit=abc"):
             resp = await client.get(f"/api/v1/extension/rules?{query}", headers=CLIENT_AUTH)
             assert resp.status == 400, query
     finally:
@@ -981,5 +981,98 @@ async def test_extension_report_rate_limited() -> None:
             )
             statuses.append(resp.status)
         assert statuses == [202, 202, 202, 429, 429]
+    finally:
+        await client.close()
+
+
+async def test_extension_cosmetic_endpoint_and_client_scope() -> None:
+    conn = init_database(":memory:")
+    _, client = await _client_app(conn)
+    try:
+        resp = await client.get("/api/v1/extension/cosmetic", headers=CLIENT_AUTH)
+        assert resp.status == 200
+        assert resp.headers["ETag"]
+        body = await resp.json()
+        assert body["count"] == len(body["selectors"])
+        assert body["count"] > 0
+        assert ".adsbygoogle" in body["selectors"]
+        assert "ins.adsbygoogle" in body["selectors"]
+        # every selector is conservative: no injection vectors
+        for selector in body["selectors"]:
+            lowered = selector.lower()
+            assert "{" not in selector and "}" not in selector
+            assert "url(" not in lowered and "@import" not in lowered
+            assert "expression" not in lowered and "javascript:" not in lowered
+            assert "<" not in selector and ">" not in selector
+
+        # 304 on unchanged content
+        etag = resp.headers["ETag"]
+        resp2 = await client.get(
+            "/api/v1/extension/cosmetic", headers={**CLIENT_AUTH, "If-None-Match": etag}
+        )
+        assert resp2.status == 304
+
+        # read/admin scopes also allowed (GET)
+        resp = await client.get("/api/v1/extension/cosmetic", headers=AUTH)
+        assert resp.status == 200
+    finally:
+        await client.close()
+
+
+async def test_cosmetic_selector_validation_rejects_injection() -> None:
+    from reqko.api.cosmetic import validate_selector
+
+    # rejection cases: injection vectors and junk
+    for bad in (
+        ".x { display: none }",
+        ".x { background: url(http://evil) }",
+        "a[href^='javascript:']",
+        ".x { behavior: url(#default#time2) }",
+        ".x { -moz-binding: url(x.xml) }",
+        "expression(alert(1))",
+        ".x < script",
+        "x" * 300,
+        "",
+        "# a comment",
+    ):
+        assert validate_selector(bad) is None, bad
+
+    # acceptance cases: plain, conservative selectors
+    for good in (
+        ".adsbygoogle",
+        'iframe[src*="doubleclick"]',
+        '[id^="div-gpt-ad"]',
+        ".advert-sidebar",
+    ):
+        assert validate_selector(good) == good, good
+
+
+async def test_extension_rules_limit_raised_for_packed_lists() -> None:
+    conn = init_database(":memory:")
+    state, client = await _client_app(conn)
+    state.engine.update_snapshot(
+        FilterSnapshot(
+            exact_set=frozenset({f"d{i}.test" for i in range(40000)}),
+            wildcard_set=frozenset(),
+            allow_exact_set=frozenset(),
+            allow_wildcard_set=frozenset(),
+        )
+    )
+    try:
+        # 40000 domains: above the old 30000 cap, within the new one
+        resp = await client.get("/api/v1/extension/rules", headers=CLIENT_AUTH)
+        body = await resp.json()
+        assert body["count"] == 40000
+        assert body["truncated"] is False
+
+        # ?limit=30000 still truncates deterministically
+        resp = await client.get(
+            "/api/v1/extension/rules?limit=30000", headers=CLIENT_AUTH
+        )
+        body = await resp.json()
+        assert body["count"] == 40000
+        assert body["truncated"] is True
+        assert len(body["domains"]) == 30000
+        assert body["domains"] == sorted(body["domains"])
     finally:
         await client.close()
