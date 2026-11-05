@@ -51,6 +51,12 @@ class QueryEvent:
     upstream: str | None
     latency_ms: float
     response_code: int
+    # Where the event came from: "dns" (real query) or "browser"
+    # (aggregated report from the browser extension).
+    source: str = "dns"
+    # Aggregated occurrence count (browser reports may batch counts);
+    # DNS events always carry 1.
+    occurrences: int = 1
 
 
 @dataclass

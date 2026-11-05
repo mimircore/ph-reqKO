@@ -26,6 +26,7 @@ if (-not (Test-Path $blocklist)) {
 # Demo-only tokens (see the note at the top of this file)
 $env:REQKO_ADMIN_TOKEN = "admin-secret-123"
 $env:REQKO_READ_TOKEN  = "read-secret-456"
+$env:REQKO_CLIENT_TOKEN = "demo-client-token-789"
 $env:REQKO_DNS_HOST = "127.0.0.1"
 $env:REQKO_DNS_PORT = "5454"
 $env:REQKO_DB_PATH  = Join-Path $root "reqko.db"

@@ -1,4 +1,4 @@
-"""REST API route handlers (FR-15, FR-16, FR-19).
+"""REST API route handlers (FR-15, FR-16, FR-19) and browser-extension feed.
 
 All SQL uses bound parameters only - user input never enters the SQL text.
 Errors are returned as RFC 7807 problem documents.
@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import hashlib
+import json
 import logging
 import time
 from collections.abc import Callable
@@ -24,7 +26,9 @@ from reqko.api.app import (
     ApiState,
     utcnow_iso,
 )
+from reqko.dns.pipeline import QueryEvent
 from reqko.dns.upstream import probe_upstream
+from reqko.filtering.parser import normalize_domain
 from reqko.filtering.updater import update_filter_engine
 
 logger = logging.getLogger(__name__)
@@ -229,6 +233,8 @@ async def handle_stats_summary(request: web.Request) -> web.Response:
             SUM(CASE WHEN status = 'ALLOWED' THEN 1 ELSE 0 END) AS allowed,
             SUM(CASE WHEN status LIKE 'REFUSED%' THEN 1 ELSE 0 END) AS refused,
             SUM(CASE WHEN status LIKE 'ERROR%' THEN 1 ELSE 0 END) AS errors,
+            SUM(CASE WHEN source = 'browser' AND status LIKE 'BLOCKED%'
+                     THEN occurrences ELSE 0 END) AS browser_blocked,
             AVG(latency_ms) AS avg_latency
         FROM query_log {where}
     """
@@ -255,6 +261,7 @@ async def handle_stats_summary(request: web.Request) -> web.Response:
         "allowed_queries": int(row.get("allowed") or 0),
         "refused_queries": int(row.get("refused") or 0),
         "error_queries": int(row.get("errors") or 0),
+        "browser_blocked": int(row.get("browser_blocked") or 0),
         "avg_latency_ms": round(float(avg_latency), 3) if avg_latency is not None else None,
     }
     return web.json_response(body)
@@ -521,6 +528,172 @@ async def handle_blocklists_update(request: web.Request) -> web.Response:
     )
 
 
+# ── browser extension (client scope; declarativeNetRequest rules feed) ────────
+
+MAX_EXTENSION_RULES_LIMIT = 30000
+MAX_REPORT_EVENTS = 500
+MAX_REPORT_OCCURRENCES = 20000  # queue-abuse bound for one report request
+
+
+async def handle_extension_rules(request: web.Request) -> web.Response:
+    """GET /api/v1/extension/rules (client scope).
+
+    Returns base-list + custom blocklist domains minus the allowlist
+    (allowlist has priority in the resolver, so the browser must not block
+    them). Deterministic ordering (sorted); optional ?limit=N (max 30000)
+    truncates stably; ETag/If-None-Match gives 304 when unchanged.
+    """
+    state: ApiState = request.app[STATE_KEY]
+    limit_raw = request.query.get("limit")
+    limit: int | None = None
+    if limit_raw is not None:
+        try:
+            limit = int(limit_raw)
+        except ValueError:
+            raise ApiProblem(
+                400, "Bad Request", detail="Invalid limit: must be an integer."
+            ) from None
+        if limit < 1 or limit > MAX_EXTENSION_RULES_LIMIT:
+            raise ApiProblem(
+                400,
+                "Bad Request",
+                detail=f"Invalid limit: must be between 1 and {MAX_EXTENSION_RULES_LIMIT}.",
+            )
+
+    snapshot = state.engine.snapshot
+
+    def _build() -> tuple[list[str], int]:
+        allow = snapshot.allow_exact_set | snapshot.allow_wildcard_set
+        candidates = (snapshot.exact_set | snapshot.wildcard_set) - allow
+        exported: set[str] = set()
+        skipped = 0
+        for domain in candidates:
+            normalized = normalize_domain(domain)
+            if normalized is None:
+                skipped += 1  # not representable as a plain domain
+            else:
+                exported.add(normalized)
+        return sorted(exported), skipped
+
+    domains, skipped = await _in_executor(_build)
+    total = len(domains)
+    truncated = limit is not None and total > limit
+    if truncated:
+        domains = domains[:limit]
+
+    body = json.dumps(
+        {
+            "version": snapshot.version,
+            "count": total,
+            "domains": domains,
+            "truncated": truncated,
+            "skipped": skipped,
+        }
+    )
+    etag = '"' + hashlib.sha256(body.encode("utf-8")).hexdigest()[:32] + '"'
+    if_none_match = request.headers.get("If-None-Match", "")
+    if etag in (tag.strip() for tag in if_none_match.split(",")):
+        return web.Response(status=304, headers={"ETag": etag})
+    return web.Response(
+        text=body,
+        content_type="application/json",
+        headers={"ETag": etag, "Cache-Control": "no-cache"},
+    )
+
+
+async def handle_extension_report(request: web.Request) -> web.Response:
+    """POST /api/v1/extension/report (client scope).
+
+    Body: {"events": [{"domain": str, "count": int, "ts": unix-seconds}]}
+    - max 500 events per request; count 1..10000; ts within the last 24 h
+    - per-IP rate limited; total occurrences per request capped at 20000
+    - stored through the existing writer queue as query_log rows with
+      status='BLOCKED', source='browser'
+    """
+    state: ApiState = request.app[STATE_KEY]
+    peer = request.remote or "unknown"
+    if state.report_limiter is not None and not state.report_limiter.is_allowed(peer):
+        raise ApiProblem(
+            429,
+            "Too Many Requests",
+            detail="Report rate limit exceeded; retry later.",
+        )
+
+    body = await _json_body(request)
+    events = body.get("events")
+    if not isinstance(events, list):
+        raise ApiProblem(400, "Bad Request", detail="Field 'events' must be a list.")
+    if len(events) > MAX_REPORT_EVENTS:
+        raise ApiProblem(
+            400,
+            "Bad Request",
+            detail=f"Too many events: max {MAX_REPORT_EVENTS} per request.",
+        )
+    if not events:
+        raise ApiProblem(400, "Bad Request", detail="Field 'events' must not be empty.")
+
+    now = time.time()
+    total_occurrences = 0
+    parsed: list[tuple[str, int]] = []
+    for event in events:
+        if not isinstance(event, dict):
+            raise ApiProblem(400, "Bad Request", detail="Each event must be an object.")
+        domain = event.get("domain")
+        count = event.get("count")
+        ts = event.get("ts")
+        if not isinstance(domain, str) or not domain.strip():
+            raise ApiProblem(
+                400, "Bad Request", detail="Field 'domain' is required and must be a string."
+            )
+        normalized = normalize_domain(domain)
+        if normalized is None:
+            raise ApiProblem(400, "Bad Request", detail=f"Invalid domain: {domain!r}.")
+        if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 10000:
+            raise ApiProblem(
+                400, "Bad Request", detail="Field 'count' must be an integer in 1..10000."
+            )
+        if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+            raise ApiProblem(400, "Bad Request", detail="Field 'ts' must be a unix timestamp.")
+        if not 0 <= now - float(ts) <= 86400:
+            raise ApiProblem(
+                400, "Bad Request", detail="Field 'ts' must be within the last 24 hours."
+            )
+        total_occurrences += count
+        if total_occurrences > MAX_REPORT_OCCURRENCES:
+            raise ApiProblem(
+                400,
+                "Bad Request",
+                detail=f"Report too large: total occurrences must not exceed {MAX_REPORT_OCCURRENCES}.",
+            )
+        parsed.append((normalized, count))
+
+    queued = 0
+    try:
+        for domain, count in parsed:
+            event = QueryEvent(
+                client_ip=peer,
+                question_name=domain,
+                question_type="A",
+                status="BLOCKED",
+                matched_rule=None,
+                upstream=None,
+                latency_ms=0.0,
+                response_code=0,
+                source="browser",
+                occurrences=count,
+            )
+            await asyncio.wait_for(state.queue.put(event), timeout=10.0)
+            queued += count
+    except asyncio.TimeoutError:
+        raise ApiProblem(
+            503,
+            "Service Unavailable",
+            detail="The query-log queue is saturated; report discarded.",
+        ) from None
+
+    return web.json_response({"status": "stored", "queued": queued}, status=202)
+
+
 # ── web panel (FR-18) ──────────────────────────────────────────────────────────
 
 
@@ -568,6 +741,8 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/api/v1/blocklist/custom", handle_blocklist_post)
     app.router.add_delete("/api/v1/blocklist/custom/{domain}", handle_blocklist_delete)
     app.router.add_post("/api/v1/blocklists/update", handle_blocklists_update)
+    app.router.add_get("/api/v1/extension/rules", handle_extension_rules)
+    app.router.add_post("/api/v1/extension/report", handle_extension_report)
 
 
 __all__ = ["register_routes"]

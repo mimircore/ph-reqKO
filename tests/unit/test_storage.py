@@ -97,7 +97,8 @@ def test_migration_v1_to_v2_adds_latency_columns() -> None:
     versions = [
         row[0] for row in conn.execute("SELECT version FROM schema_migrations ORDER BY version")
     ]
-    assert versions == [1, 2]
+    # v1 databases migrate forward through ALL later versions (2 and 3)
+    assert versions == [1, 2, 3]
 
     # Existing aggregates survive the migration
     row = conn.execute(
@@ -225,3 +226,87 @@ def test_stats_hourly_upsert_sums_correctly() -> None:
     assert row["allowed_queries"] == 1
     assert row["refused_queries"] == 1
     assert row["error_queries"] == 1
+
+
+def test_migration_v2_to_v3_adds_source_and_blocked_status() -> None:
+    """A v2 database (query_log without source/occurrences) is upgraded in
+    place: existing rows keep their data with source='dns', and the new
+    'BLOCKED' status (browser-extension reports) becomes valid."""
+    conn = get_db_connection(":memory:")
+    # Recreate the OLD v2 query_log shape (no source/occurrences, no BLOCKED)
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            description TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS query_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            client_ip TEXT NOT NULL,
+            question_name TEXT NOT NULL,
+            question_type TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN (
+                'ALLOWED', 'FORWARDED', 'BLOCKED_BLACKLIST', 'BLOCKED_CNAME',
+                'CACHED', 'REFUSED_ACL', 'REFUSED_RATE_LIMIT', 'REFUSED_ANY',
+                'ERROR_UPSTREAM', 'ERROR_FORMAT'
+            )),
+            matched_rule TEXT,
+            upstream TEXT,
+            latency_ms REAL NOT NULL,
+            response_code INTEGER NOT NULL
+        );
+        INSERT INTO schema_migrations (version, description) VALUES (1, 'v1');
+        INSERT INTO schema_migrations (version, description) VALUES (2, 'v2');
+        INSERT INTO query_log (client_ip, question_name, question_type, status, latency_ms, response_code)
+            VALUES ('192.168.1.5', 'old.example.com', 'A', 'FORWARDED', 1.5, 0);
+        """
+    )
+    conn.commit()
+
+    apply_migrations(conn)
+
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(query_log)")}
+    assert "source" in cols
+    assert "occurrences" in cols
+
+    versions = [
+        row[0] for row in conn.execute("SELECT version FROM schema_migrations ORDER BY version")
+    ]
+    assert versions == [1, 2, 3]
+
+    # Existing v2 data survives with source='dns', occurrences=1
+    row = conn.execute(
+        "SELECT client_ip, question_name, status, source, occurrences FROM query_log"
+    ).fetchone()
+    assert row is not None
+    assert row["question_name"] == "old.example.com"
+    assert row["source"] == "dns"
+    assert row["occurrences"] == 1
+
+    # The new BLOCKED status (browser reports) is now accepted
+    conn.execute(
+        """
+        INSERT INTO query_log (client_ip, question_name, question_type, status,
+                               latency_ms, response_code, source, occurrences)
+        VALUES ('browser', 'ads.example.com', 'A', 'BLOCKED', 0.0, 0, 'browser', 5)
+        """
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT source, occurrences FROM query_log WHERE status = 'BLOCKED'"
+    ).fetchone()
+    assert row is not None
+    assert row["source"] == "browser"
+    assert row["occurrences"] == 5
+
+    # source CHECK still rejects unknown sources
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """
+            INSERT INTO query_log (client_ip, question_name, question_type, status,
+                                   latency_ms, response_code, source)
+            VALUES ('x', 'y', 'A', 'BLOCKED', 0.0, 0, 'smtp')
+            """
+        )

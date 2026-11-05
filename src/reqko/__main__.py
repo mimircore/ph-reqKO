@@ -56,7 +56,8 @@ async def _bootstrap_tokens(config: Config, conn: sqlite3.Connection) -> tuple[T
                 admin_hash = hash_token(generated)
                 set_setting(conn, ADMIN_TOKEN_HASH_KEY, admin_hash)
         read_hash = hash_token(config.read_token) if config.read_token else None
-        return TokenStore(admin_hash, read_hash), generated
+        client_hash = hash_token(config.client_token) if config.client_token else None
+        return TokenStore(admin_hash, read_hash, client_hash), generated
 
     return await loop.run_in_executor(None, _sync)
 
@@ -174,6 +175,9 @@ async def _run(config: Config) -> None:
             limit=config.auth_failure_limit,
             window=config.auth_failure_window,
         ),
+        # Browser-extension report rate limit: bursts up to 60 reports,
+        # sustained 2/s per client IP
+        report_limiter=RateLimiter(rate_rps=2.0, burst=60.0),
         allowed_local_dirs=allowed_dirs,
     )
     app = create_app(state)

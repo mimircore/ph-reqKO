@@ -11,7 +11,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 SCHEMA_SQL_PATH = Path(__file__).parent / "schema.sql"
 
 # Forward-only migrations for databases created by older schema versions.
@@ -23,6 +23,51 @@ MIGRATIONS: dict[int, tuple[str, str]] = {
         """
         ALTER TABLE stats_hourly ADD COLUMN latency_sum REAL NOT NULL DEFAULT 0;
         ALTER TABLE stats_hourly ADD COLUMN latency_samples INTEGER NOT NULL DEFAULT 0;
+        """,
+    ),
+    3: (
+        "v3: query_log source (dns|browser) and occurrences for browser-extension reports",
+        """
+        CREATE TABLE query_log_v3 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            client_ip TEXT NOT NULL,
+            question_name TEXT NOT NULL,
+            question_type TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN (
+                'ALLOWED',
+                'FORWARDED',
+                'BLOCKED',
+                'BLOCKED_BLACKLIST',
+                'BLOCKED_CNAME',
+                'CACHED',
+                'REFUSED_ACL',
+                'REFUSED_RATE_LIMIT',
+                'REFUSED_ANY',
+                'ERROR_UPSTREAM',
+                'ERROR_FORMAT'
+            )),
+            matched_rule TEXT,
+            upstream TEXT,
+            latency_ms REAL NOT NULL,
+            response_code INTEGER NOT NULL,
+            source TEXT NOT NULL DEFAULT 'dns' CHECK(source IN ('dns', 'browser')),
+            occurrences INTEGER NOT NULL DEFAULT 1
+        );
+        INSERT INTO query_log_v3 (
+            id, timestamp, client_ip, question_name, question_type, status,
+            matched_rule, upstream, latency_ms, response_code, source, occurrences
+        )
+        SELECT id, timestamp, client_ip, question_name, question_type, status,
+               matched_rule, upstream, latency_ms, response_code, 'dns', 1
+        FROM query_log;
+        DROP TABLE query_log;
+        ALTER TABLE query_log_v3 RENAME TO query_log;
+        CREATE INDEX IF NOT EXISTS idx_query_log_timestamp ON query_log(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_query_log_client_ip ON query_log(client_ip);
+        CREATE INDEX IF NOT EXISTS idx_query_log_question_name ON query_log(question_name);
+        CREATE INDEX IF NOT EXISTS idx_query_log_status ON query_log(status);
+        CREATE INDEX IF NOT EXISTS idx_query_log_source ON query_log(source);
         """,
     ),
 }

@@ -43,6 +43,9 @@ class Config:
     metrics_port: int = 9100
     # Optional read-only API token (GET endpoints only).
     read_token: str | None = None
+    # Optional browser-extension token: may call ONLY the two
+    # /api/v1/extension/* endpoints (never stats, rules, or admin).
+    client_token: str | None = None
     upstream_dns: list[tuple[str, int]] = field(
         default_factory=lambda: [("9.9.9.9", 53), ("149.112.112.112", 53)]
     )
@@ -98,6 +101,7 @@ class Config:
             env.get("REQKO_ADMIN_TOKEN") or env.get("REQKO_API_KEY") or ""
         ).strip() or None
         read_token = env.get("REQKO_READ_TOKEN", "").strip() or None
+        client_token = env.get("REQKO_CLIENT_TOKEN", "").strip() or None
 
         # 2. Host and ports
         dns_host = env.get("REQKO_DNS_HOST", "0.0.0.0").strip()
@@ -259,6 +263,7 @@ class Config:
             metrics_host=metrics_host,
             metrics_port=metrics_port,
             read_token=read_token,
+            client_token=client_token,
             upstream_dns=upstream_dns,
             upstream_timeout=upstream_timeout,
             block_mode=block_mode,

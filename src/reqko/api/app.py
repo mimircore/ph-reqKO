@@ -14,6 +14,7 @@ from aiohttp import web
 from reqko.api.auth import AuthFailureLimiter, TokenStore
 from reqko.config import Config
 from reqko.dns.pipeline import QueryEvent
+from reqko.dns.ratelimit import RateLimiter
 from reqko.filtering.engine import FilterEngine
 from reqko.filtering.rules import RuleManager
 
@@ -24,6 +25,15 @@ PUBLIC_PATHS = frozenset({"/health", "/ready"})
 # Everything under /panel is public static content: the files contain no
 # data and fetch it client-side with the user's Bearer token.
 PUBLIC_PREFIXES = ("/panel",)
+
+# The "client" scope (browser extension token) may call ONLY these
+# endpoint/method pairs — never stats, never rules, never admin.
+CLIENT_SCOPE_ALLOWED: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("GET", "/api/v1/extension/rules"),
+        ("POST", "/api/v1/extension/report"),
+    }
+)
 
 SECURITY_HEADERS: dict[str, str] = {
     "X-Content-Type-Options": "nosniff",
@@ -81,6 +91,8 @@ class ApiState:
     drop_counter: list[int]
     tokens: TokenStore
     auth_limiter: AuthFailureLimiter
+    # Per-client-IP rate limit for browser-extension reports (FR: abuse bound)
+    report_limiter: RateLimiter | None = None
     started_at: float = field(default_factory=time.monotonic)
     probe_timeout: float = 1.0
     # Local directories a blocklist file source may live in (path traversal guard)
@@ -127,6 +139,8 @@ async def auth_middleware(request: web.Request, handler: Handler) -> web.StreamR
     - /health is public.
     - GET requires the "read" or "admin" scope.
     - POST/DELETE require the "admin" scope.
+    - The "client" scope (browser extension) may call ONLY the two
+      /api/v1/extension/* endpoint/method pairs — everything else is 403.
     - Failed attempts are rate limited per client IP (429).
     """
     state: ApiState = request.app[STATE_KEY]
@@ -156,6 +170,16 @@ async def auth_middleware(request: web.Request, handler: Handler) -> web.StreamR
         return problem(401, "Unauthorized", detail="Unknown or invalid token.")
 
     needs_admin = request.method in ("POST", "DELETE", "PUT", "PATCH")
+    if scope == "client":
+        if (request.method, request.path) in CLIENT_SCOPE_ALLOWED:
+            request[SCOPE_KEY] = scope
+            return await handler(request)
+        return problem(
+            403,
+            "Forbidden",
+            detail="The client scope may only call /api/v1/extension/rules "
+            "and /api/v1/extension/report.",
+        )
     if needs_admin and scope != "admin":
         return problem(
             403,

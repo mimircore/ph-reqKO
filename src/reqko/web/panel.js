@@ -85,6 +85,7 @@
     el("tile-total").textContent = String(data.total_queries);
     el("tile-blocked").textContent = data.blocked_percentage + "%";
     el("tile-cache").textContent = data.cache_hit_percentage + "%";
+    el("tile-browser").textContent = String(data.browser_blocked);
     el("tile-latency").textContent =
       data.avg_latency_ms === null ? "–" : data.avg_latency_ms + " ms";
   }

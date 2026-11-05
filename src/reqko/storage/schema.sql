@@ -45,20 +45,25 @@ CREATE TABLE IF NOT EXISTS query_log (
     question_type TEXT NOT NULL,
     status TEXT NOT NULL CHECK(status IN (
         'ALLOWED',
-        'FORWARDED', 
-        'BLOCKED_BLACKLIST', 
-        'BLOCKED_CNAME', 
-        'CACHED', 
-        'REFUSED_ACL', 
-        'REFUSED_RATE_LIMIT', 
-        'REFUSED_ANY', 
+        'FORWARDED',
+        'BLOCKED',
+        'BLOCKED_BLACKLIST',
+        'BLOCKED_CNAME',
+        'CACHED',
+        'REFUSED_ACL',
+        'REFUSED_RATE_LIMIT',
+        'REFUSED_ANY',
         'ERROR_UPSTREAM',
         'ERROR_FORMAT'
     )),
     matched_rule TEXT,
     upstream TEXT,
     latency_ms REAL NOT NULL,
-    response_code INTEGER NOT NULL
+    response_code INTEGER NOT NULL,
+    -- v3: event origin (dns query vs aggregated browser-extension report)
+    source TEXT NOT NULL DEFAULT 'dns' CHECK(source IN ('dns', 'browser')),
+    -- v3: aggregated occurrence count (browser reports batch counts)
+    occurrences INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS idx_query_log_timestamp ON query_log(timestamp);

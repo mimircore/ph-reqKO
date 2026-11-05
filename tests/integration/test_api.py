@@ -33,7 +33,7 @@ from reqko.dns.protocol import (
     parse_wire,
 )
 from reqko.dns.ratelimit import RateLimiter
-from reqko.filtering.engine import FilterEngine
+from reqko.filtering.engine import FilterEngine, FilterSnapshot
 from reqko.filtering.rules import RuleManager
 from reqko.storage.migrations import init_database
 
@@ -690,5 +690,296 @@ async def test_ready_is_public_and_reflects_rules() -> None:
         assert resp.status == 200
         body = await resp.json()
         assert body["status"] == "ready" and body["rules_loaded"] == 1
+    finally:
+        await client.close()
+
+
+# ── browser extension (client scope) ───────────────────────────────────────────
+
+CLIENT_TOKEN = "client-token-789"
+CLIENT_AUTH = {"Authorization": f"Bearer {CLIENT_TOKEN}"}
+
+
+async def _client_app(conn: sqlite3.Connection) -> tuple[ApiState, TestClient[web.Request, web.Application]]:
+    """Builds a state with a client token and returns (state, client)."""
+    state = _state(conn)
+    state.tokens = TokenStore(
+        hash_token(ADMIN_TOKEN), None, hash_token(CLIENT_TOKEN)
+    )
+    client = await _start(state)
+    return state, client
+
+
+async def test_client_scope_can_fetch_rules_but_nothing_else() -> None:
+    conn = init_database(":memory:")
+    _, client = await _client_app(conn)
+    try:
+        # The two allowed endpoints
+        resp = await client.get("/api/v1/extension/rules", headers=CLIENT_AUTH)
+        assert resp.status == 200
+        resp = await client.post(
+            "/api/v1/extension/report",
+            json={"events": [{"domain": "x.test", "count": 1, "ts": 1}]},
+            headers=CLIENT_AUTH,
+        )
+        # ts=1 is far older than 24h -> 400 proves the endpoint is reachable
+        # (validation happens after auth); the 403 test is below.
+        assert resp.status == 400
+
+        # Everything else must be 403 for the client scope
+        for method, path in (
+            ("GET", "/api/v1/stats/summary"),
+            ("GET", "/api/v1/queries"),
+            ("GET", "/api/v1/allowlist"),
+            ("GET", "/api/v1/stats/top-domains"),
+            ("POST", "/api/v1/allowlist"),
+            ("POST", "/api/v1/blocklist/custom"),
+            ("POST", "/api/v1/blocklists/update"),
+            ("DELETE", "/api/v1/allowlist/x.test"),
+            ("GET", "/health/other"),  # not the real /health
+        ):
+            resp = await client.request(
+                method, path, headers=CLIENT_AUTH,
+                json={"domain": "x.test"} if method == "POST" else None,
+            )
+            assert resp.status == 403, f"{method} {path}: {resp.status}"
+    finally:
+        await client.close()
+
+
+async def test_read_and_admin_tokens_keep_working() -> None:
+    conn = init_database(":memory:")
+    state = _state(conn, read_token=READ_TOKEN)
+    client = await _start(state)
+    try:
+        resp = await client.get(
+            "/api/v1/stats/summary", headers={"Authorization": f"Bearer {READ_TOKEN}"}
+        )
+        assert resp.status == 200
+        resp = await client.get("/api/v1/extension/rules", headers=AUTH)
+        assert resp.status == 200
+        resp = await client.post(
+            "/api/v1/extension/report",
+            json={"events": [{"domain": "x.test", "count": 1,
+                              "ts": __import__("time").time()}]},
+            headers=AUTH,
+        )
+        assert resp.status == 202
+    finally:
+        await client.close()
+
+
+async def test_extension_rules_content_allowlist_priority_and_deterministic_order() -> None:
+    conn = init_database(":memory:")
+    state, client = await _client_app(conn)
+    # base blocklist: b.test, a.test, wildcard w.test; allowlist: keep.test, a.test
+    state.engine.update_snapshot(
+        FilterSnapshot(
+            exact_set=frozenset({"a.test", "b.test"}),
+            wildcard_set=frozenset({"w.test"}),
+            allow_exact_set=frozenset({"keep.test", "a.test"}),
+            allow_wildcard_set=frozenset(),
+        )
+    )
+    client = await _start(state)
+    try:
+        resp = await client.get("/api/v1/extension/rules", headers=CLIENT_AUTH)
+        assert resp.status == 200
+        body = await resp.json()
+        # allowlisted a.test is excluded; deterministic sorted order
+        assert body["domains"] == ["b.test", "w.test"]
+        assert body["count"] == 2
+        assert body["truncated"] is False
+        assert body["skipped"] == 0
+        assert isinstance(body["version"], int)
+        assert "ETag" in resp.headers
+    finally:
+        await client.close()
+
+
+async def test_extension_rules_etag_304_and_limit_truncation() -> None:
+    conn = init_database(":memory:")
+    state, client = await _client_app(conn)
+    state.engine.update_snapshot(
+        FilterSnapshot(
+            exact_set=frozenset({f"d{i}.test" for i in range(5)}),
+            wildcard_set=frozenset(),
+            allow_exact_set=frozenset(),
+            allow_wildcard_set=frozenset(),
+        )
+    )
+    client = await _start(state)
+    try:
+        resp1 = await client.get("/api/v1/extension/rules?limit=3", headers=CLIENT_AUTH)
+        body1 = await resp1.json()
+        assert body1["count"] == 5
+        assert body1["truncated"] is True
+        assert len(body1["domains"]) == 3
+        # deterministic truncation: sorted order
+        assert body1["domains"] == sorted(body1["domains"])
+
+        etag = resp1.headers["ETag"]
+        resp2 = await client.get(
+            "/api/v1/extension/rules?limit=3",
+            headers={**CLIENT_AUTH, "If-None-Match": etag},
+        )
+        assert resp2.status == 304
+        assert await resp2.read() == b""
+
+        # changed content -> new ETag, 200
+        state.engine.update_snapshot(
+            FilterSnapshot(
+                exact_set=frozenset({f"d{i}.test" for i in range(6)}),
+                wildcard_set=frozenset(),
+                allow_exact_set=frozenset(),
+                allow_wildcard_set=frozenset(),
+            )
+        )
+        resp3 = await client.get(
+            "/api/v1/extension/rules?limit=3",
+            headers={**CLIENT_AUTH, "If-None-Match": etag},
+        )
+        assert resp3.status == 200
+        assert resp3.headers["ETag"] != etag
+
+        # limit validation
+        for query in ("limit=0", "limit=30001", "limit=abc"):
+            resp = await client.get(f"/api/v1/extension/rules?{query}", headers=CLIENT_AUTH)
+            assert resp.status == 400, query
+    finally:
+        await client.close()
+
+
+async def test_extension_rules_skips_unrepresentable_entries() -> None:
+    conn = init_database(":memory:")
+    state, client = await _client_app(conn)
+    # A rule that is not a valid plain domain (simulates future rule kinds):
+    # inserted directly, bypassing add_rule validation
+    def _insert() -> None:
+        conn.execute(
+            "INSERT INTO custom_rules (rule_type, syntax_type, domain, enabled) "
+            "VALUES ('blacklist', 'exact', 'not a domain!', 1)"
+        )
+        conn.commit()
+
+    import asyncio as _asyncio
+
+    await _asyncio.get_running_loop().run_in_executor(None, _insert)
+    # Reload the engine from the DB so the invalid domain is in the snapshot
+    def _reload() -> None:
+        from reqko.filtering.rules import RuleManager as _RM
+        fresh = _RM(state.engine, conn)
+        fresh.load_persisted()
+
+    await _asyncio.get_running_loop().run_in_executor(None, _reload)
+
+    client = await _start(state)
+    try:
+        resp = await client.get("/api/v1/extension/rules", headers=CLIENT_AUTH)
+        body = await resp.json()
+        assert body["skipped"] >= 1
+        assert "not a domain!" not in body["domains"]
+    finally:
+        await client.close()
+
+
+async def test_extension_report_stores_browser_events() -> None:
+    conn = init_database(":memory:")
+    state, client = await _client_app(conn)
+    # Run the REAL query-log writer against the same DB so the queue is drained
+    from reqko.storage.writer import QueryLogWriter as _Writer
+    writer = _Writer(conn, batch_size=1, flush_interval=60.0)
+    writer_task = asyncio.create_task(writer.run(state.queue))
+    try:
+        now = __import__("time").time()
+        resp = await client.post(
+            "/api/v1/extension/report",
+            json={"events": [
+                {"domain": "ads.test", "count": 3, "ts": now},
+                {"domain": "trackers.test", "count": 1, "ts": now},
+            ]},
+            headers=CLIENT_AUTH,
+        )
+        assert resp.status == 202
+        body = await resp.json()
+        assert body["queued"] == 4
+
+        # rows are stored through the writer path (batch flush) - wait for it
+        import asyncio as _asyncio
+        await _asyncio.sleep(0.3)
+
+        def _rows() -> list[sqlite3.Row]:
+            return conn.execute(
+                "SELECT question_name, status, source, occurrences FROM query_log "
+                "WHERE source = 'browser' ORDER BY question_name"
+            ).fetchall()
+
+        await writer.stop()
+        await writer_task
+        rows = await _asyncio.get_running_loop().run_in_executor(None, _rows)
+        assert len(rows) == 2
+        assert rows[0]["question_name"] == "ads.test"
+        assert rows[0]["status"] == "BLOCKED"
+        assert rows[0]["source"] == "browser"
+        assert rows[0]["occurrences"] == 3
+
+        # summary exposes browser_blocked
+        resp = await client.get("/api/v1/stats/summary", headers=AUTH)
+        summary = await resp.json()
+        assert summary["browser_blocked"] == 4
+    finally:
+        await client.close()
+
+
+async def test_extension_report_validation_errors() -> None:
+    conn = init_database(":memory:")
+    _, client = await _client_app(conn)
+    now = __import__("time").time()
+    try:
+        bad_bodies = [
+            {"events": "not-a-list"},
+            {"events": []},
+            {"events": [{"domain": "x.test"}]},                       # no count/ts
+            {"events": [{"domain": 5, "count": 1, "ts": now}]},       # domain not str
+            {"events": [{"domain": "bad domain!", "count": 1, "ts": now}]},
+            {"events": [{"domain": "x.test", "count": 0, "ts": now}]},
+            {"events": [{"domain": "x.test", "count": 10001, "ts": now}]},
+            {"events": [{"domain": "x.test", "count": True, "ts": now}]},
+            {"events": [{"domain": "x.test", "count": 1, "ts": "now"}]},
+            {"events": [{"domain": "x.test", "count": 1, "ts": now - 90000}]},  # >24h
+            {"events": [{"domain": "x.test", "count": 1, "ts": now + 500}]},    # future
+            {"events": [{"domain": f"e{i}.test", "count": 40, "ts": now}
+                        for i in range(501)]},                        # >500 events
+        ]
+        for body in bad_bodies:
+            resp = await client.post(
+                "/api/v1/extension/report", json=body, headers=CLIENT_AUTH
+            )
+            assert resp.status == 400, body
+    finally:
+        await client.close()
+
+
+async def test_extension_report_rate_limited() -> None:
+    conn = init_database(":memory:")
+    state = _state(conn)
+    state.tokens = TokenStore(
+        hash_token(ADMIN_TOKEN), None, hash_token(CLIENT_TOKEN)
+    )
+    # small limiter for the test: burst 3
+    from reqko.dns.ratelimit import RateLimiter as _RL
+    state.report_limiter = _RL(rate_rps=0.1, burst=3.0)
+    client = await _start(state)
+    now = __import__("time").time()
+    try:
+        statuses = []
+        for _ in range(5):
+            resp = await client.post(
+                "/api/v1/extension/report",
+                json={"events": [{"domain": "x.test", "count": 1, "ts": now}]},
+                headers=CLIENT_AUTH,
+            )
+            statuses.append(resp.status)
+        assert statuses == [202, 202, 202, 429, 429]
     finally:
         await client.close()
