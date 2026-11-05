@@ -26,6 +26,7 @@ from reqko.api.app import (
     ApiState,
     utcnow_iso,
 )
+from reqko.api.cosmetic import load_selectors
 from reqko.dns.pipeline import QueryEvent
 from reqko.dns.upstream import probe_upstream
 from reqko.filtering.parser import normalize_domain
@@ -530,7 +531,7 @@ async def handle_blocklists_update(request: web.Request) -> web.Response:
 
 # ── browser extension (client scope; declarativeNetRequest rules feed) ────────
 
-MAX_EXTENSION_RULES_LIMIT = 30000
+MAX_EXTENSION_RULES_LIMIT = 100000
 MAX_REPORT_EVENTS = 500
 MAX_REPORT_OCCURRENCES = 20000  # queue-abuse bound for one report request
 
@@ -694,6 +695,29 @@ async def handle_extension_report(request: web.Request) -> web.Response:
     return web.json_response({"status": "stored", "queued": queued}, status=202)
 
 
+async def handle_extension_cosmetic(request: web.Request) -> web.Response:
+    """GET /api/v1/extension/cosmetic (client scope).
+
+    Returns the curated generic CSS selector list for cosmetic filtering.
+    The selectors are validated server-side; the extension re-validates
+    before injecting. ETag/304 like /extension/rules.
+    """
+    def _load() -> tuple[list[str], str]:
+        return load_selectors()
+
+    selectors, version = await _in_executor(_load)
+    body = json.dumps({"version": version, "count": len(selectors), "selectors": selectors})
+    etag = '"' + hashlib.sha256(body.encode("utf-8")).hexdigest()[:32] + '"'
+    if_none_match = request.headers.get("If-None-Match", "")
+    if etag in (tag.strip() for tag in if_none_match.split(",")):
+        return web.Response(status=304, headers={"ETag": etag})
+    return web.Response(
+        text=body,
+        content_type="application/json",
+        headers={"ETag": etag, "Cache-Control": "no-cache"},
+    )
+
+
 # ── web panel (FR-18) ──────────────────────────────────────────────────────────
 
 
@@ -742,6 +766,7 @@ def register_routes(app: web.Application) -> None:
     app.router.add_delete("/api/v1/blocklist/custom/{domain}", handle_blocklist_delete)
     app.router.add_post("/api/v1/blocklists/update", handle_blocklists_update)
     app.router.add_get("/api/v1/extension/rules", handle_extension_rules)
+    app.router.add_get("/api/v1/extension/cosmetic", handle_extension_cosmetic)
     app.router.add_post("/api/v1/extension/report", handle_extension_report)
 
 

@@ -7,7 +7,7 @@
 // - every dynamic rule is replaced atomically in one updateDynamicRules call.
 
 import {
-  buildDnrRules,
+  buildPackedRules,
   parseRulesPayload,
   replacePlan,
   buildPauseRule,
@@ -29,6 +29,7 @@ const DEFAULTS = {
   serverUrl: "http://127.0.0.1:8080",
   clientToken: "",
   etag: "",
+  cosmeticEtag: "",
   lastSync: 0,
   lastError: "",
   ruleIds: [],
@@ -37,6 +38,8 @@ const DEFAULTS = {
   blockedToday: { day: "", total: 0 },
   pendingReports: [],
   pausedSites: [],
+  cosmeticSelectors: [],
+  cosmeticEnabled: true,
 };
 
 // ── storage helpers (browser API, thin wrappers) ──────────────────────────────
@@ -65,6 +68,7 @@ async function syncRules() {
     const kind = classifyRulesResponse(response.status);
 
     if (kind === "unchanged") {
+      await syncCosmetic();
       await saveConfig({ lastSync: Date.now(), lastError: "" });
       return;
     }
@@ -81,7 +85,7 @@ async function syncRules() {
       return;
     }
 
-    const newRules = buildDnrRules(parsed.domains, 1);
+    const newRules = buildPackedRules(parsed.domains, 1);
     const plan = replacePlan(cfg.ruleIds, newRules);
     // Atomic replace: remove every rule we installed, add the new set
     await browser.declarativeNetRequest.updateDynamicRules({
@@ -98,11 +102,46 @@ async function syncRules() {
       ruleCount: newRules.length,
       truncated: parsed.truncated,
     });
+    await syncCosmetic();
     await updateBadge();
   } catch (err) {
     // Fail-open: network down, server down, malformed JSON - keep old rules
     await saveConfig({ lastError: String(err) });
   }
+}
+
+// ── cosmetic selectors sync ────────────────────────────────────────────────────
+
+async function syncCosmetic() {
+  const cfg = await getConfig();
+  if (!cfg.clientToken) return;
+  try {
+    const headers = { Authorization: "Bearer " + cfg.clientToken };
+    if (cfg.cosmeticEtag) headers["If-None-Match"] = cfg.cosmeticEtag;
+    const response = await fetch(cfg.serverUrl + "/api/v1/extension/cosmetic", { headers });
+    const kind = classifyRulesResponse(response.status);
+    if (kind === "unchanged") return;
+    if (kind === "error") return; // keep last good selectors
+    const payload = await response.json();
+    if (!Array.isArray(payload.selectors)) return;
+    await saveConfig({
+      cosmeticSelectors: payload.selectors.filter(isSelectorSafe),
+      cosmeticEtag: response.headers.get("ETag") || "",
+    });
+  } catch (err) {
+    // Fail-open: keep the last good selector list
+  }
+}
+
+// Selector safety must mirror the server AND the content script.
+function isSelectorSafe(selector) {
+  if (typeof selector !== "string") return false;
+  if (selector.length === 0 || selector.length > 256) return false;
+  const lowered = selector.toLowerCase();
+  for (const forbidden of ["{", "}", "<", ">", "@import", "url(", "expression", "javascript:", "behavior", "-moz-binding"]) {
+    if (lowered.includes(forbidden)) return false;
+  }
+  return true;
 }
 
 // ── pause on this site ─────────────────────────────────────────────────────────
@@ -216,6 +255,7 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
           pausedSites: cfg.pausedSites,
           pendingReports: cfg.pendingReports.length,
           hasToken: Boolean(cfg.clientToken),
+          cosmeticEnabled: cfg.cosmeticEnabled,
         });
         return;
       }

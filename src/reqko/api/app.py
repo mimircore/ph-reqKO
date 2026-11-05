@@ -31,6 +31,7 @@ PUBLIC_PREFIXES = ("/panel",)
 CLIENT_SCOPE_ALLOWED: frozenset[tuple[str, str]] = frozenset(
     {
         ("GET", "/api/v1/extension/rules"),
+        ("GET", "/api/v1/extension/cosmetic"),
         ("POST", "/api/v1/extension/report"),
     }
 )
