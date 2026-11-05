@@ -102,6 +102,19 @@ REQKO_ADMIN_TOKEN=changeme-admin-token REQKO_DNS_PORT=5454 REQKO_DNS_HOST=127.0.
 
 The full variable list lives in [docs/03-architecture.md](docs/03-architecture.md) (section 9); the API surface is documented in [docs/05-implementation.md](docs/05-implementation.md).
 
+## Browser extension
+
+A Manifest V3 extension (Chrome/Edge/Firefox 113+) blocks ad and tracker
+domains **inside the browser** using the same lists as your ph-reqKO server -
+no system DNS change needed. The server exposes a dedicated, least-privilege
+client scope for it: `REQKO_CLIENT_TOKEN` may only call
+`GET /api/v1/extension/rules` and `POST /api/v1/extension/report`.
+
+Load it unpacked (`chrome://extensions` -> Developer mode) from the
+`extension/` directory, then set the server URL and the client token in the
+extension options. Full install steps, limits and security notes:
+[docs/06-browser-extension.md](docs/06-browser-extension.md).
+
 ## Demo
 
 One-command demo on Windows PowerShell (uses demo-only tokens, see the script header):
