@@ -14,7 +14,7 @@ DNS-резолвер ph-reqKO блокирует домены для всей с
 flowchart LR
     subgraph Browser["Браузер (Chrome / Edge / Firefox 113+)"]
         BG["background.js (MV3, ES module)<br/>sync: alarms 30 мин + кнопка"]
-        DNR["declarativeNetRequest<br/>dynamic rules: ||domain^"]
+        DNR["declarativeNetRequest<br/>packed dynamic rules:<br/>requestDomains chunks of 5000"]
         Popup["popup: счётчики, pause, sync"]
         Lib["lib/rules.js, lib/report.js,<br/>lib/fetch.js (чистая логика, без browser API)"]
     end
@@ -28,6 +28,7 @@ flowchart LR
     Rules -->|"200 JSON / 304"| BG
     BG --- DNR
     DNR -->|"block: script, image, xhr, sub_frame,<br/>ping, media, font, stylesheet, other<br/>(НЕ main_frame)"| Web["Веб-страницы"]
+        CSS["content.js (document_start):<br/>инъекция одного <style> —<br/>display:none для селекторов с сервера"]
     BG -->|"getMatchedRules (квота 20/10 мин)"| DNR
     BG -->|"агрегированные счётчики"| Report --> Queue
     Queue --> Summary
@@ -43,6 +44,9 @@ flowchart LR
 | Параметр | Chrome | Firefox | Источник |
 |---|---|---|---|
 | Динамические правила | `MAX_NUMBER_OF_DYNAMIC_RULES` = **30000** (до Chrome 120: 5000 суммарно с session) | Firefox ≤ 127: суммарный лимит dynamic+session; **с Firefox 128** — отдельные `MAX_NUMBER_OF_DYNAMIC_RULES` и `MAX_NUMBER_OF_SESSION_RULES` | developer.chrome.com/docs/extensions/reference/api/declarativeNetRequest; developer.mozilla.org/.../api/declarativeNetRequest |
+| `requestDomains` в condition | Поддерживается с Chrome 101: «The rule will only match network requests when the domain matches one from the list»; субдомены покрыты («Sub-domains like "a.example.com" are also allowed»); пустой список запрещён; лимит на число доменов в списке **не задокументирован** | MDN RuleCondition: свойство документировано, «An empty list is not allowed»; точная минимальная версия Firefox — NOT VERIFIED (compat-таблица не извлекается WebFetch) | developer.chrome.com (RuleCondition); developer.mozilla.org (RuleCondition) |
+| Упаковка ph-reqKO | Домены пакуются в rules по **5000 `requestDomains` на правило**: 77758 доменов StevenBlack → **16 правил**; 30000-правил cap хватает на 150 млн доменов. Сервер отдаёт до `?limit=100000` доменов | Реальный прогон: `HTTP 200 | count: 77758 | truncated: False`; `?limit=30000` → 6 правил | этот документ, раздел 3.1; docs/evidence/07-runtime.txt |
+| Косметическая фильтрация | `GET /api/v1/extension/cosmetic` отдаёт консервативный список CSS-селекторов (37 в стартовой поставке); content script на document_start инъектирует один `<style>` с `display: none !important`; валидация с двух сторон (сервер и content script) отклоняет `{`, `}`, `<`, `>`, `@import`, `url(`, `expression`, `javascript:`, `behavior`, `-moz-binding`; per-site pause отключает и косметику | раздел 3.2; content.js | этот документ |
 | Session rules | 5000 | см. выше | там же |
 | Regex-правила | ≤ 1000, CompiledPattern ≤ 2 КБ | там же | developer.chrome.com |
 | `getMatchedRules` | требует permission **`declarativeNetRequestFeedback`**; квота **20 вызовов / 10 минут** (`MAX_GETMATCHEDRULES_CALLS_PER_INTERVAL` × `GETMATCHEDRULES_QUOTA_INTERVAL`) | функция есть, но **только при `extensions.dnr.feedback=true`** в about:config (или `web-ext --pref`) — в release-каналах reporting недоступен без ручной настройки | developer.chrome.com; developer.mozilla.org |
@@ -105,6 +109,8 @@ HTTP 202 {"status": "stored", "queued": 9}
 | Приложения вне браузера не покрыты | DNR действует только внутри браузера; системный DNS-фильтр (ядро ph-reqKO) продолжает работать параллельно |
 | Первые (first-party) запросы к самому сайту не блокируются | `main_frame` исключён из resourceTypes намеренно |
 | Chrome Android / iOS Safari не поддерживаются | Chrome for Android не грузит расширения; iOS — другой API (Safari Web Extensions) |
+| Видеореклама и first-party вставки в HTML самого сайта не удаляются косметикой | Косметика скрывает только контейнеры по селекторам; видео-реклама встроена в плеер | Цели 8: оценка покрытия |
+| Блокировка страниц (main_frame) намеренно отключена | Фильтр не должен ломать навигацию | — |
 | Лимит 30000 правил | При большем списке сервер отдаёт `?limit=30000` + `truncated=true`; попап показывает предупреждение |
 | Reporting в Firefox выключен по умолчанию | Требуется `extensions.dnr.feedback=true`; блокировка при этом работает полностью |
 | Квота getMatchedRules | 20 вызовов / 10 мин — отчёт раз в 30 минут и открытие попапа укладываются с запасом |
@@ -131,11 +137,23 @@ HTTP 202 {"status": "stored", "queued": 9}
 | Firefox desktop temporary install | ❌ NOT RUN |
 | Firefox for Android (AMO signing / Nightly collection) | ❌ NOT VERIFIED |
 
-### 7.1. Чек-лист ручной проверки блокировки (браузер недоступен автоматизации)
+### 7.1. Чек-лист ручной проверки (браузер недоступен автоматизации — блокировка в реальном браузере NOT RUN)
 
-1. `powershell -File scripts/run_demo.ps1` (сервер с demo-токенами).
-2. `chrome://extensions` → Developer mode → Load unpacked → каталог `extension/`.
-3. Options → Server URL `http://127.0.0.1:8080`, Client token `demo-client-token-789` → Save.
-4. Popup → Sync now → Rules: 3, Last sync обновилось.
-5. Открыть страницу, загружающую `http://ads.example.com/x.js` (и контролный домен не из списка) → DevTools Network: `ads.example.com` — `(blocked:client)` / `ERR_BLOCKED_BY_CLIENT`; контролный — обычная сетевая ошибка.
-6. Плитка «Blocked in browser» на `http://127.0.0.1:8080/panel` растёт; в `query_log` строки с `source='browser'`.
+Подготовка: `powershell -File scripts/run_demo.ps1` (сервер с demo-токенами: admin `admin-secret-123`, client `demo-client-token-789`).
+
+**Установка:**
+1. `chrome://extensions` → Developer mode → Load unpacked → каталог `extension/`.
+2. Options → Server URL `http://127.0.0.1:8080`, Client token `demo-client-token-789` → Save.
+3. Popup → **Sync now** → «Rules: 3» (демо-список) или 16 packed rules / 77758 доменов, если сервер настроен с REQKO_BLOCKLIST_URLS=StevenBlack.
+
+**Сетевая блокировка (DNR):**
+4. Открыть страницу, загружающую `http://ads.example.com/x.js` → DevTools Network: статус `(blocked:client)` / `ERR_BLOCKED_BY_CLIENT`; контролный домен не из списка — обычная сетевая ошибка.
+5. Popup → Blocked today растёт; Pause on this site → домен сайта перестаёт блокироваться; Resume — снова блокируется.
+
+**Косметическая фильтрация:**
+6. `curl -H "Authorization: Bearer demo-client-token-789" http://127.0.0.1:8080/api/v1/extension/cosmetic` → 37 селекторов.
+7. Открыть тестовую страницу с `<div class="adsbygoogle">` и `<div class="advert">` → элементы скрыты (`display: none`), в DOM виден `<style id="ph-reqko-cosmetic-style">`.
+8. Popup → Cosmetic filtering: OFF → элементы появляются снова; ON → скрыты.
+
+**Проверка на панели:**
+9. `http://127.0.0.1:8080/panel` → плитка «Blocked in browser» растёт; `query_log` содержит строки с `source='browser'`.
