@@ -6,7 +6,9 @@ Usage:
 
 The validator enforces the security contract of extension/manifest.json:
 required fields, the exact permission set, the strict extension_pages CSP,
-no remote code vectors, and that every referenced file exists.
+no remote code vectors, that every referenced file exists, and that every
+ES-module import in extension/**/*.js resolves to a real export (via
+extension_check).
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import types
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -23,23 +26,27 @@ EXTENSION_DIR = ROOT / "extension"
 DIST_DIR = ROOT / "dist"
 ZIP_PATH = DIST_DIR / "ph-reqko-extension.zip"
 
-REQUIRED_PERMISSIONS = {
-    "declarativeNetRequest",
-    "declarativeNetRequestFeedback",
-    "storage",
-    "alarms",
-}
-FORBIDDEN_PERMISSIONS = {
-    "tabs",  # not needed: popup uses activeTab-style queries via extension pages
-    "webRequest",
-    "webRequestBlocking",
-    "scripting",
-    "nativeMessaging",
-    "proxy",
-    "management",
-    "history",
-    "cookies",
-}
+REQUIRED_PERMISSIONS = frozenset(
+    {
+        "declarativeNetRequest",
+        "declarativeNetRequestFeedback",
+        "activeTab",  # popup reads the active tab URL (pause/resume, counts)
+        "storage",
+        "alarms",
+    }
+)
+FORBIDDEN_PERMISSIONS = frozenset(
+    {
+        "webRequest",
+        "webRequestBlocking",
+        "scripting",
+        "nativeMessaging",
+        "proxy",
+        "management",
+        "history",
+        "cookies",
+    }
+)
 REQUIRED_BACKGROUND_KEYS = {"scripts", "service_worker"}
 REQUIRED_CSP_TOKENS = ("script-src 'self'", "object-src 'none'")
 FORBIDDEN_CSP_TOKENS = ("unsafe-inline", "unsafe-eval", "http://", "https://")
@@ -141,13 +148,38 @@ def collect_bundle_files(referenced: list[str]) -> list[Path]:
     return unique
 
 
+def _load_extension_check() -> Any:
+    """Loads the sibling extension_check.py as a module (scripts/ is not a
+    package, and the repo root must not become importable from scripts)."""
+    import importlib.util
+
+    checker_path = Path(__file__).resolve().parent / "extension_check.py"
+    spec = importlib.util.spec_from_file_location("extension_check", checker_path)
+    assert spec is not None and spec.loader is not None
+    module: Any = types.ModuleType(spec.name)
+    module.__file__ = str(checker_path)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def build(check_only: bool) -> None:
     manifest_path = EXTENSION_DIR / "manifest.json"
     raw = manifest_path.read_bytes()
     manifest = json.loads(raw.decode("utf-8"))
     referenced = validate_manifest(manifest, raw)
 
-    # Sanity: no inline scripts in any bundled HTML (CSP forbids them)
+    # Static import/export, messaging and permission-usage checks: the build
+    # fails if any named import does not resolve (e.g. Firefox failing with
+    # "doesn't provide an export named ...").
+    extension_check = _load_extension_check()
+    problems = extension_check.check_extension(EXTENSION_DIR)
+    if problems:
+        for problem in problems:
+            print(f"PROBLEM: {problem}", file=sys.stderr)
+        raise ValidationIssue(
+            f"extension static checks failed: {len(problems)} problem(s)"
+        )
     for path in collect_bundle_files(referenced):
         if path.suffix == ".html":
             html = path.read_text(encoding="utf-8")

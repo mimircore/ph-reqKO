@@ -11,7 +11,6 @@ import {
   parseRulesPayload,
   replacePlan,
   buildPauseRule,
-  buildDnrRule,
 } from "./lib/rules.js";
 import {
   aggregateMatchedRules,

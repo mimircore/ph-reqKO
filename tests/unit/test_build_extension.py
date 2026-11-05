@@ -55,7 +55,7 @@ def test_overbroad_permission_fails() -> None:
     manifest = _base_manifest()
     manifest["permissions"] = sorted(
         {"declarativeNetRequest", "declarativeNetRequestFeedback", "storage",
-         "alarms", "tabs"}
+         "alarms", "activeTab", "webRequest"}
     )
     with pytest.raises(builder.ValidationIssue, match="over-broad permissions"):
         builder.validate_manifest(manifest, b"{}")
