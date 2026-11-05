@@ -40,6 +40,11 @@ async function refresh() {
     errorNode.hidden = false;
   }
 
+  const cosmeticNode = el("toggle-cosmetic");
+  cosmeticNode.textContent = status.cosmeticEnabled
+    ? "Cosmetic filtering: ON"
+    : "Cosmetic filtering: OFF";
+
   const tab = await currentTab();
   const host = tab && tab.url ? siteHost(tab.url) : null;
   const paused = status.pausedSites.some((p) => p.host === "||" + host + "^");
@@ -79,6 +84,12 @@ el("resume-site").addEventListener("click", async () => {
     await browser.runtime.sendMessage({ type: "resumeSite", host });
     await refresh();
   }
+});
+
+el("toggle-cosmetic").addEventListener("click", async () => {
+  const stored = await browser.storage.local.get({ cosmeticEnabled: true });
+  await browser.storage.local.set({ cosmeticEnabled: !stored.cosmeticEnabled });
+  await refresh();
 });
 
 refresh();

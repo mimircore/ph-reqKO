@@ -29,6 +29,14 @@
     "scripts": ["background.js"],
     "type": "module"
   },
+  "content_scripts": [
+    {
+      "js": ["content.js"],
+      "matches": ["http://*/*", "https://*/*"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
   "action": {
     "default_popup": "popup.html",
     "default_title": "ph-reqKO"
