@@ -20,11 +20,11 @@
 
 ### Защищённые базовые домены (PROTECTED)
 
-Домены, registrable base которых входит в защищённый список, **никогда не предлагаются**, даже при совпадении ключевых слов: google.com, googleapis.com, gstatic.com, googleusercontent.com, facebook.com, fbcdn.net, instagram.com, whatsapp.com, microsoft.com, windows.com, apple.com, icloud.com, cloudflare.com, amazonaws.com, github.com, miui.com, xiaomi.com, а также wildcard `firebase*` и `connectivitycheck.*`.
+Домены, registrable base которых входит в защищённый список, **никогда не предлагаются**, даже при совпадении ключевых слов: google.com, googleapis.com, gstatic.com, googleusercontent.com, facebook.com, **facebook.net** (connect.facebook.net — Facebook SDK), fbcdn.net, instagram.com, whatsapp.com, microsoft.com, windows.com, apple.com, icloud.com, cloudflare.com, amazonaws.com, github.com, miui.com, xiaomi.com, **yandex.net** (favicon.yandex.net — сервис фавиконок), а также wildcard `firebase*` и `connectivitycheck.*`.
 
 Исключение: хосты вида `ad.intl.xiaomi.com` (Xiaomi ad hosts на защищённом base) остаются suggestible — ключевое слово `ad` в самом хосте отменяет защиту для base xiaomi.com/miui.com только.
 
-Список редактируется в `src/reqko/filtering/data/protected_bases.txt` (package-data), тесты фиксируют поведение для googleapis/facebook/gstatic.
+Список редактируется в `src/reqko/filtering/data/protected_bases.txt` (package-data), тесты фиксируют поведение для googleapis/facebook/gstatic/facebook.net/yandex.net.
 
 ### Registrable base
 
@@ -42,6 +42,16 @@
 | POST | `/api/v1/suggestions/{domain}/reject` | admin | Пометить rejected (анализатор больше не предлагает) |
 
 Auto-approve: `REQKO_SUGGEST_AUTO_APPROVE_SCORE=<N>` — предложения с score ≥ N автоматически получают правило blocklist (wildcard для base с keyword, иначе exact) и помечаются `auto=1` для последующего ревью. По умолчанию выключено.
+
+### 2.1 Панель: карточка «Suggested domains»
+
+![Карточка Suggested domains в панели](img/panel-suggestions.png)
+
+- **Таблица** Domain | Score | Reasons (бейджи) | Hits | Actions, сортировка score ↓, затем hits ↓. По умолчанию — топ-20, кнопка «Show more» показывает ещё по 20.
+- **Фильтр** «Keyword suggestions only» оставляет строки, у которых есть причина `keyword:*`.
+- **Admin token** — отдельное поле в карточке; хранится только в `sessionStorage` и отправляется только вместе с действием approve/reject (список загружается read-токеном). Без токена кнопок нет, показывается подсказка «Enter admin token to approve.»; на 403 — «This action needs the admin token.»
+- **«Approve all keyword-based»** — массовое одобрение всех pending-предложений с keyword-причиной. Перед выполнением — диалог подтверждения со списком доменов (защищённые базы уже отсечены анализатором на этапе анализа). Одобрения идут последовательно, по одному запросу на домен.
+- CSP остаётся строгим: без inline-скриптов и стилей, данные вставляются только через `textContent` (тест `test_panel_suggestions_ui_static_contract` фиксирует контракт: все id из panel.js существуют в index.html, нет innerHTML/document.write/eval).
 
 ## 3. Периодический refresh блоклистов
 
