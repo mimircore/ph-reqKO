@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 import socket
 import struct
 import sys
@@ -653,12 +654,11 @@ async def test_watchdog_probes_live_server_and_records_status() -> None:
         )
         try:
             for _ in range(200):
-                if status.last_probe_ok is not None and status.event_loop_lag_ms is not None:
+                if status.last_probe_ok is not None:
                     break
                 await asyncio.sleep(0.01)
             assert status.last_probe_ok is not None
             assert status.consecutive_failures == 0
-            assert status.event_loop_lag_ms is not None
         finally:
             stop.set()
             await asyncio.wait_for(task, timeout=5.0)
@@ -742,4 +742,61 @@ async def test_udp_rebind_replaces_endpoint_and_keeps_serving() -> None:
             udp.transport.close()
         handles.tcp.close()
         await handles.tcp.wait_closed()
+        await fake.stop()
+
+
+async def test_upstream_failure_serves_stale_cache_entry() -> None:
+    """RFC 8767: with the upstream down, an expired cache entry is served with
+    a short stale TTL instead of SERVFAIL."""
+    current_time = 5000.0
+
+    def mock_clock() -> float:
+        return current_time
+
+    fake = FakeUpstreamServer(
+        FakeUpstreamConfig(answers={"stale.srv.com": [("stale.srv.com.", 60, "A", "203.0.113.77")]})
+    )
+    await fake.start()
+    cache = DNSCache(clock=mock_clock, min_ttl=60, max_ttl=3600)
+    _, port, udp_t, tcp_s = await _start_resolver(fake, cache=cache)
+    try:
+        resp1 = await _udp_query(port, "stale.srv.com.")
+        assert resp1.answer[0][0].to_text() == "203.0.113.77"
+
+        # The entry expires and the upstream dies
+        current_time += 120.0
+        await fake.stop()
+
+        resp2 = await _udp_query(port, "stale.srv.com.")
+        assert resp2.rcode() == dns.rcode.NOERROR
+        assert resp2.answer[0][0].to_text() == "203.0.113.77"
+        assert resp2.answer[0].ttl == 30  # SERVE_STALE_TTL
+    finally:
+        await _stop_resolver(udp_t, tcp_s)
+
+
+async def test_slow_query_logs_warning_with_attempts(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A query slower than SLOW_QUERY_MS logs WARNING with name and attempts."""
+    fake = FakeUpstreamServer(
+        FakeUpstreamConfig(
+            answers={"slow.srv.com": [("slow.srv.com.", 300, "A", "10.0.0.99")]},
+            udp_delay={"slow.srv.com": 0.65},
+        )
+    )
+    await fake.start()
+    _, port, udp_t, tcp_s = await _start_resolver(fake)
+    try:
+        with caplog.at_level(logging.WARNING, logger="reqko.dns.pipeline"):
+            resp = await _udp_query(port, "slow.srv.com.")
+            assert resp.rcode() == dns.rcode.NOERROR
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING
+                    and "Slow query" in r.getMessage()]
+        assert warnings, "no slow-query WARNING logged"
+        message = warnings[-1].getMessage()
+        assert "slow.srv.com" in message
+        assert "attempts=1" in message
+    finally:
+        await _stop_resolver(udp_t, tcp_s)
         await fake.stop()

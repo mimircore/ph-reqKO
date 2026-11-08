@@ -33,7 +33,8 @@ from reqko.dns.protocol import (
     parse_wire,
 )
 from reqko.dns.ratelimit import RateLimiter
-from reqko.dns.server import DnsProbeStatus
+from reqko.dns.server import DnsProbeStatus, LoopLagMonitor
+from reqko.dns.upstream import UpstreamResult
 from reqko.filtering.engine import FilterEngine, FilterSnapshot
 from reqko.filtering.rules import RuleManager
 from reqko.storage.migrations import init_database
@@ -538,7 +539,7 @@ async def test_allowlist_change_takes_effect_on_next_dns_query() -> None:
         questions=[DNSQuestion(name="dual.test", qtype=TYPE_A)],
         answers=[DNSRecord("dual.test", TYPE_A, CLASS_IN, 300, "6.6.6.6")],
     )
-    mock = AsyncMock(return_value=(fake_resp, "127.0.0.1:53"))
+    mock = AsyncMock(return_value=UpstreamResult(response=fake_resp, upstream="127.0.0.1:53", attempts=1))
 
     try:
         # 1. Block via API
@@ -1126,7 +1127,7 @@ async def test_approve_adds_rule_that_changes_next_dns_answer() -> None:
         questions=[DNSQuestion(name="ads-test.example", qtype=TYPE_A)],
         answers=[DNSRecord("ads-test.example", TYPE_A, CLASS_IN, 300, "9.9.9.9")],
     )
-    mock = AsyncMock(return_value=(fake_resp, "127.0.0.1:53"))
+    mock = AsyncMock(return_value=UpstreamResult(response=fake_resp, upstream="127.0.0.1:53", attempts=1))
 
     try:
         _seed_suggestion(conn, "ads-test.example", "ads-test.example")
@@ -1300,8 +1301,8 @@ async def test_health_exposes_self_probe_status_and_lag() -> None:
     state.dns_probe = DnsProbeStatus(
         last_probe_ok="2026-11-08 20:00:00",
         consecutive_failures=0,
-        event_loop_lag_ms=1.25,
     )
+    state.loop_lag = LoopLagMonitor()
     client = await _start(state)
     try:
         resp = await client.get("/health")
@@ -1310,13 +1311,75 @@ async def test_health_exposes_self_probe_status_and_lag() -> None:
         assert body["self_probe"] == {
             "last_probe_ok": "2026-11-08 20:00:00",
             "consecutive_failures": 0,
-            "event_loop_lag_ms": 1.2,  # round(1.25, 1) -> 1.2 (banker rounding)
         }
+        # No samples yet (monitor task not started in tests)
+        assert body["event_loop_lag_ms"] is None
 
         # Failure counters are reported verbatim for alerting
         state.dns_probe.consecutive_failures = 2
         resp = await client.get("/health")
         body = await resp.json()
         assert body["self_probe"]["consecutive_failures"] == 2
+    finally:
+        await client.close()
+
+
+async def test_health_reports_loop_lag_max_over_window() -> None:
+    """event_loop_lag_ms is the max sleep-drift sample recorded so far."""
+    conn = init_database(":memory:")
+    state = _state(conn)
+    monitor = LoopLagMonitor()
+    state.loop_lag = monitor
+    client = await _start(state)
+    try:
+        # Feed samples directly through the public API shape: simulate by
+        # recording drift via a short run of the monitor task.
+        stop = asyncio.Event()
+        task = asyncio.create_task(monitor.run(stop))
+        await asyncio.sleep(0.35)  # ~3 samples at 0.1 s interval
+        stop.set()
+        await asyncio.wait_for(task, timeout=2.0)
+
+        resp = await client.get("/health")
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["event_loop_lag_ms"] is not None
+        assert body["event_loop_lag_ms"] >= 0.0
+    finally:
+        await client.close()
+
+
+async def test_stats_summary_latency_percentiles_by_group() -> None:
+    """latency_ms groups upstream (FORWARDED+ERROR_UPSTREAM), cached and
+    blocked separately; p50/p95/p99/max come from raw per-query latencies."""
+    conn = init_database(":memory:")
+    state = _state(conn)
+    _insert_event(conn, "2026-11-08 10:00:00", "127.0.0.1", "a.example", "FORWARDED", 10.0)
+    _insert_event(conn, "2026-11-08 10:00:01", "127.0.0.1", "b.example", "FORWARDED", 20.0)
+    _insert_event(conn, "2026-11-08 10:00:02", "127.0.0.1", "c.example", "FORWARDED", 30.0)
+    _insert_event(conn, "2026-11-08 10:00:03", "127.0.0.1", "d.example", "CACHED", 0.1)
+    _insert_event(conn, "2026-11-08 10:00:04", "127.0.0.1", "e.example", "ERROR_UPSTREAM", 2000.0)
+    _insert_event(conn, "2026-11-08 10:00:05", "127.0.0.1", "f.example", "BLOCKED_BLACKLIST", 0.2)
+    client = await _start(state)
+    try:
+        resp = await client.get("/api/v1/stats/summary", headers=AUTH)
+        assert resp.status == 200
+        body = await resp.json()
+
+        # upstream group = 3 FORWARDED + the ERROR_UPSTREAM outlier: exactly
+        # the shape that destroys the mean (2 s outlier in a 10-30 ms crowd)
+        upstream = body["latency_ms"]["upstream"]
+        assert upstream["samples"] == 4
+        assert upstream["p50"] == 25.0
+        assert upstream["p95"] == 1704.5  # 30 + (2000-30)*0.85
+        assert upstream["max"] == 2000.0
+
+        cached = body["latency_ms"]["cached"]
+        assert cached == {"p50": 0.1, "p95": 0.1, "p99": 0.1, "max": 0.1, "samples": 1}
+
+        assert body["latency_ms"]["blocked"]["samples"] == 1
+        # The mean stays for compatibility — visibly skewed by the 2s outlier
+        assert body["avg_latency_ms"] > 300.0
+        assert body["latency_ms"]["upstream"]["p50"] < body["avg_latency_ms"]
     finally:
         await client.close()
