@@ -11,7 +11,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 SCHEMA_SQL_PATH = Path(__file__).parent / "schema.sql"
 
 # Forward-only migrations for databases created by older schema versions.
@@ -23,6 +23,26 @@ MIGRATIONS: dict[int, tuple[str, str]] = {
         """
         ALTER TABLE stats_hourly ADD COLUMN latency_sum REAL NOT NULL DEFAULT 0;
         ALTER TABLE stats_hourly ADD COLUMN latency_samples INTEGER NOT NULL DEFAULT 0;
+        """,
+    ),
+    4: (
+        "v4: domain_suggestions table for adaptive ad-domain discovery",
+        """
+        CREATE TABLE IF NOT EXISTS domain_suggestions (
+            domain TEXT PRIMARY KEY,
+            base TEXT NOT NULL,
+            score INTEGER NOT NULL,
+            reasons_json TEXT NOT NULL,
+            hits INTEGER NOT NULL,
+            first_seen TIMESTAMP NOT NULL,
+            last_seen TIMESTAMP NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending', 'approved', 'rejected')),
+            auto INTEGER NOT NULL DEFAULT 0,
+            decided_at TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_domain_suggestions_status
+            ON domain_suggestions(status);
         """,
     ),
     3: (

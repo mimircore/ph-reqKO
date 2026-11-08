@@ -97,8 +97,9 @@ def test_migration_v1_to_v2_adds_latency_columns() -> None:
     versions = [
         row[0] for row in conn.execute("SELECT version FROM schema_migrations ORDER BY version")
     ]
-    # v1 databases migrate forward through ALL later versions (2 and 3)
-    assert versions == [1, 2, 3]
+    # v1 databases migrate forward through ALL later versions
+    assert versions[0] == 1
+    assert versions[-1] == CURRENT_SCHEMA_VERSION
 
     # Existing aggregates survive the migration
     row = conn.execute(
@@ -274,7 +275,9 @@ def test_migration_v2_to_v3_adds_source_and_blocked_status() -> None:
     versions = [
         row[0] for row in conn.execute("SELECT version FROM schema_migrations ORDER BY version")
     ]
-    assert versions == [1, 2, 3]
+    # v2 databases migrate forward through ALL later versions
+    assert versions[0] == 1
+    assert versions[-1] == CURRENT_SCHEMA_VERSION
 
     # Existing v2 data survives with source='dns', occurrences=1
     row = conn.execute(
@@ -308,5 +311,112 @@ def test_migration_v2_to_v3_adds_source_and_blocked_status() -> None:
             INSERT INTO query_log (client_ip, question_name, question_type, status,
                                    latency_ms, response_code, source)
             VALUES ('x', 'y', 'A', 'BLOCKED', 0.0, 0, 'smtp')
+            """
+        )
+
+
+def test_migration_v3_to_v4_adds_domain_suggestions() -> None:
+    """A v3 database is upgraded in place: the domain_suggestions table
+    (adaptive ad-domain discovery) is added; existing v3 data survives."""
+    conn = get_db_connection(":memory:")
+    # Recreate the v3 shape: query_log already has source/occurrences,
+    # domain_suggestions does not exist yet.
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            description TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS query_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            client_ip TEXT NOT NULL,
+            question_name TEXT NOT NULL,
+            question_type TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN (
+                'ALLOWED', 'FORWARDED', 'BLOCKED', 'BLOCKED_BLACKLIST',
+                'BLOCKED_CNAME', 'CACHED', 'REFUSED_ACL', 'REFUSED_RATE_LIMIT',
+                'REFUSED_ANY', 'ERROR_UPSTREAM', 'ERROR_FORMAT'
+            )),
+            matched_rule TEXT,
+            upstream TEXT,
+            latency_ms REAL NOT NULL,
+            response_code INTEGER NOT NULL,
+            source TEXT NOT NULL DEFAULT 'dns' CHECK(source IN ('dns', 'browser')),
+            occurrences INTEGER NOT NULL DEFAULT 1
+        );
+        INSERT INTO schema_migrations (version, description) VALUES (1, 'v1');
+        INSERT INTO schema_migrations (version, description) VALUES (2, 'v2');
+        INSERT INTO schema_migrations (version, description) VALUES (3, 'v3');
+        INSERT INTO query_log (client_ip, question_name, question_type, status, latency_ms, response_code)
+            VALUES ('192.168.1.5', 'old.example.com', 'A', 'FORWARDED', 1.5, 0);
+        """
+    )
+    conn.commit()
+
+    apply_migrations(conn)
+
+    tables = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    assert "domain_suggestions" in tables
+
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(domain_suggestions)")}
+    assert {
+        "domain", "base", "score", "reasons_json", "hits",
+        "first_seen", "last_seen", "status", "auto", "decided_at",
+    }.issubset(cols)
+
+    indexes = {
+        row[1]
+        for row in conn.execute("PRAGMA index_list(domain_suggestions)")
+    }
+    assert "idx_domain_suggestions_status" in indexes
+
+    versions = [
+        row[0] for row in conn.execute("SELECT version FROM schema_migrations ORDER BY version")
+    ]
+    # v3 databases migrate forward through ALL later versions
+    assert versions[0] == 1
+    assert versions[-1] == CURRENT_SCHEMA_VERSION
+
+    # Existing v3 query_log data survives untouched
+    row = conn.execute(
+        "SELECT question_name, source, occurrences FROM query_log"
+    ).fetchone()
+    assert row is not None
+    assert row["question_name"] == "old.example.com"
+    assert row["source"] == "dns"
+    assert row["occurrences"] == 1
+
+    # The status CHECK accepts the three lifecycle states
+    conn.execute(
+        """
+        INSERT INTO domain_suggestions (
+            domain, base, score, reasons_json, hits, first_seen, last_seen, status
+        ) VALUES
+            ('a.example', 'a.example', 5, '[]', 3, 0, 0, 'pending'),
+            ('b.example', 'b.example', 4, '[]', 2, 0, 0, 'approved'),
+            ('c.example', 'c.example', 3, '[]', 2, 0, 0, 'rejected')
+        """
+    )
+    conn.commit()
+    statuses = [
+        r[0] for r in conn.execute(
+            "SELECT status FROM domain_suggestions ORDER BY domain"
+        )
+    ]
+    # Ordered by domain: a=pending, b=approved, c=rejected
+    assert statuses == ["pending", "approved", "rejected"]
+
+    # Unknown lifecycle states are rejected
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """
+            INSERT INTO domain_suggestions (
+                domain, base, score, reasons_json, hits, first_seen, last_seen, status
+            ) VALUES ('d.example', 'd.example', 1, '[]', 1, 0, 0, 'maybe')
             """
         )
