@@ -85,11 +85,17 @@ REQKO_ADMIN_TOKEN=changeme-admin-token REQKO_DNS_PORT=5454 REQKO_DNS_HOST=127.0.
 |---|---|---|
 | `REQKO_ADMIN_TOKEN` | *(generated once, printed to stdout)* | Admin API token (all endpoints) |
 | `REQKO_READ_TOKEN` | *(none)* | Optional read-only API token (GET only) |
+| `REQKO_CLIENT_TOKEN` | *(none)* | Optional least-privilege token for the browser extension (extension rules + report only) |
 | `REQKO_DNS_HOST` / `REQKO_DNS_PORT` | `0.0.0.0` / `53` | DNS listeners (UDP+TCP) |
 | `REQKO_API_HOST` / `REQKO_API_PORT` | `127.0.0.1` / `8080` | REST API bind address |
 | `REQKO_DB_PATH` | `/data/reqko.db` | SQLite database file (WAL) |
 | `REQKO_BLOCKLIST_FILES` | *(none)* | Comma-separated local blocklist files loaded at startup |
-| `REQKO_BLOCKLIST_URLS` | *(none)* | Comma-separated http(s) blocklist URLs (refresh via `POST /api/v1/blocklists/update`) |
+| `REQKO_BLOCKLIST_URLS` | *(none)* | Comma-separated http(s) blocklist URLs (refresh via `POST /api/v1/blocklists/update`; periodic refresh below) |
+| `REQKO_BLOCKLIST_REFRESH_HOURS` | `24` | Periodic blocklist URL refresh with ETag/If-None-Match (0 disables; failures keep last good lists) |
+| `REQKO_SUGGEST_WINDOW_HOURS` | `24` | Domain-suggestions analysis window over `query_log` |
+| `REQKO_SUGGEST_MIN_HITS` | `2` | Minimum queries per domain in the window |
+| `REQKO_SUGGEST_INTERVAL_MINUTES` | `15` | Suggestion scheduler interval (0 disables) |
+| `REQKO_SUGGEST_AUTO_APPROVE_SCORE` | *(off)* | Auto-approve suggestions with score >= N (unset = manual review) |
 | `REQKO_BLOCK_MODE` | `NULL` | Blocking answer: `NULL` (0.0.0.0), `NXDOMAIN`, `NODATA` |
 | `REQKO_LOG_CLIENT_IP` | `full` | Query-log privacy: `full` / `anonymized` (mask last IPv4 octet / last 80 IPv6 bits) / `off` |
 | `REQKO_LOG_RETENTION_DAYS` | `7` | `query_log` retention (deleted at startup and hourly) |
@@ -115,6 +121,16 @@ Load it unpacked (`chrome://extensions` -> Developer mode) from the
 extension options. Full install steps, limits and security notes:
 [docs/06-browser-extension.md](docs/06-browser-extension.md).
 
+## Domain suggestions (adaptive discovery)
+
+The server analyzes its own query log (keyword labels, fallback-after-blocked
+pattern, sibling bursts) and proposes candidate ad domains in the panel under
+"Suggested domains". Nothing is blocked until you approve a suggestion; reject
+is remembered forever. Well-known infrastructure (google, microsoft, apple,
+cloudflare, ...) is protected and never suggested. Optional auto-approve:
+`REQKO_SUGGEST_AUTO_APPROVE_SCORE=<N>`. Details, signals and an honest
+real-data precision evaluation: [docs/06-domain-suggestions.md](docs/06-domain-suggestions.md).
+
 ## Demo
 
 One-command demo on Windows PowerShell (uses demo-only tokens, see the script header):
@@ -138,6 +154,7 @@ queries arrive.
 - [Goal 3 — Architecture and Database Design](docs/03-architecture.md) (in Russian)
 - [Goal 4 — Implementation: resolver, filtering, cache, pipeline](docs/04-implementation.md) (in Russian)
 - [Goal 5 — Implementation: statistics storage and REST API](docs/05-implementation.md) (in Russian)
+- [Goal 6 addendum — Adaptive ad-domain discovery](docs/06-domain-suggestions.md) (in Russian)
 
 ## License
 
