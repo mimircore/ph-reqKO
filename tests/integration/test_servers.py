@@ -8,18 +8,26 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import socket
 import struct
+import sys
 
 import dns.message
 import dns.rcode
+import pytest
 
 from integration.fake_upstream import FakeUpstreamConfig, FakeUpstreamServer
 from reqko.dns.acl import ClientACL
 from reqko.dns.cache import DNSCache
-from reqko.dns.pipeline import PipelineConfig, QueryEvent
+from reqko.dns.pipeline import SELF_PROBE_NAME, PipelineConfig, QueryEvent
 from reqko.dns.protocol import DNSHeader
 from reqko.dns.ratelimit import RateLimiter
-from reqko.dns.server import run_dns_servers
+from reqko.dns.server import (
+    DnsProbeStatus,
+    DnsUdpWatchdog,
+    run_dns_servers,
+    start_dns_servers,
+)
 from reqko.filtering.engine import FilterEngine, FilterSnapshot
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -551,4 +559,187 @@ async def test_log_queue_receives_statuses_via_server() -> None:
         assert statuses == ["FORWARDED", "CACHED", "BLOCKED_BLACKLIST"]
     finally:
         await _stop_resolver(udp_transport, tcp_server)
+        await fake.stop()
+
+
+# ── Windows UDP reset hardening (WinError 10054) ───────────────────────────────
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows ICMP port-unreachable behaviour")
+async def test_windows_udp_survives_client_socket_closed_after_send() -> None:
+    """Regression: a client that closes its socket right after sending must
+    not kill the UDP server (the reply triggers an ICMP port-unreachable;
+    without SIO_UDP_CONNRESET=FALSE the proactor read loop dies silently)."""
+    fake = FakeUpstreamServer(FakeUpstreamConfig())
+    await fake.start()
+    engine = FilterEngine(_snapshot(frozenset({"ads.srv.com"}), frozenset()))
+    _, port, udp_t, tcp_s = await _start_resolver(fake, filter_engine=engine)
+    try:
+        blocked_q = dns.message.make_query("ads.srv.com.", "A").to_wire()
+
+        # Poison: send from a socket closed IMMEDIATELY afterwards
+        poison = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        poison.sendto(blocked_q, ("127.0.0.1", port))
+        poison.close()
+        # Let the server reply into the void and the ICMP come back
+        # (Windows delivers the correlated WSAECONNRESET with noticeable delay)
+        await asyncio.sleep(1.0)
+
+        # The server must still answer a normal query
+        resp = dns.message.from_wire(await _udp_exchange(port, blocked_q, timeout=2.0))
+        assert resp.rcode() == dns.rcode.NOERROR
+        assert resp.answer[0][0].to_text() == "0.0.0.0"
+    finally:
+        await _stop_resolver(udp_t, tcp_s)
+        await fake.stop()
+
+
+async def test_self_probe_name_answered_locally_and_not_logged() -> None:
+    """The watchdog probe name is answered with REFUSED locally: no upstream
+    query, no query_log event; regular queries keep working and logging."""
+    fake = FakeUpstreamServer(FakeUpstreamConfig())
+    await fake.start()
+    log_queue: asyncio.Queue[QueryEvent] = asyncio.Queue()
+    cfg = PipelineConfig(
+        acl=ClientACL([ipaddress.ip_network("127.0.0.1/32")]),
+        rate_limiter=RateLimiter(rate_rps=10000.0, burst=20000.0),
+        filter_engine=FilterEngine(),
+        cache=DNSCache(),
+        upstreams=[fake.address],
+        upstream_timeout=2.0,
+        block_mode="NULL",
+        log_queue=log_queue,
+    )
+    udp_transport, tcp_server = await run_dns_servers(cfg, "127.0.0.1", 0)
+    sock = udp_transport.get_extra_info("socket")
+    assert sock is not None
+    port = sock.getsockname()[1]
+    try:
+        raw = await _udp_exchange(
+            port, dns.message.make_query(SELF_PROBE_NAME, "A").to_wire()
+        )
+        resp = dns.message.from_wire(raw)
+        assert resp.rcode() == dns.rcode.REFUSED
+        assert len(fake.queries) == 0   # never forwarded upstream
+        assert log_queue.qsize() == 0   # never logged
+
+        await _udp_query(port, "after-probe.srv.com.")  # FORWARDED + logged
+        assert log_queue.qsize() == 1
+        assert log_queue.get_nowait().status == "FORWARDED"
+    finally:
+        await _stop_resolver(udp_transport, tcp_server)
+        await fake.stop()
+
+
+class _PortTarget:
+    """ProbeTarget stand-in bound to a fixed port (no rebinds expected)."""
+
+    def __init__(self, port: int) -> None:
+        self.port = port
+
+    async def rebind(self) -> None:
+        raise AssertionError("rebind must not be called for a live server")
+
+
+async def test_watchdog_probes_live_server_and_records_status() -> None:
+    fake = FakeUpstreamServer(FakeUpstreamConfig())
+    await fake.start()
+    _, port, udp_t, tcp_s = await _start_resolver(fake)
+    try:
+        status = DnsProbeStatus()
+        stop = asyncio.Event()
+        task = asyncio.create_task(
+            DnsUdpWatchdog(_PortTarget(port), status, interval=0.05, timeout=1.0).run(stop)
+        )
+        try:
+            for _ in range(200):
+                if status.last_probe_ok is not None and status.event_loop_lag_ms is not None:
+                    break
+                await asyncio.sleep(0.01)
+            assert status.last_probe_ok is not None
+            assert status.consecutive_failures == 0
+            assert status.event_loop_lag_ms is not None
+        finally:
+            stop.set()
+            await asyncio.wait_for(task, timeout=5.0)
+        assert len(fake.queries) == 0  # probes never touch the upstream
+    finally:
+        await _stop_resolver(udp_t, tcp_s)
+        await fake.stop()
+
+
+class _DeadTarget:
+    """ProbeTarget pointing at a closed loopback port; counts rebinds."""
+
+    def __init__(self) -> None:
+        self.port = 1  # nothing listens on loopback port 1
+        self.rebinds = 0
+
+    async def rebind(self) -> None:
+        self.rebinds += 1
+
+
+async def test_watchdog_rebinds_after_two_consecutive_failures() -> None:
+    target = _DeadTarget()
+    status = DnsProbeStatus()
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        DnsUdpWatchdog(target, status, interval=0.02, timeout=0.05).run(stop)
+    )
+    try:
+        for _ in range(300):
+            if target.rebinds >= 1:
+                break
+            await asyncio.sleep(0.01)
+        assert target.rebinds >= 1
+        assert status.consecutive_failures >= 2
+        assert status.last_probe_ok is None
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, timeout=5.0)
+
+
+async def test_udp_rebind_replaces_endpoint_and_keeps_serving() -> None:
+    """UdpDnsServer.rebind(): the endpoint is replaced, the port is kept and
+    the new transport answers queries (watchdog recovery path)."""
+    fake = FakeUpstreamServer(FakeUpstreamConfig())
+    await fake.start()
+    engine = FilterEngine(_snapshot(frozenset({"ads.srv.com"}), frozenset()))
+    # An explicit (non-ephemeral) port: rebind must keep serving on it
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    probe.bind(("127.0.0.1", 0))
+    fixed_port = probe.getsockname()[1]
+    probe.close()
+    cfg = PipelineConfig(
+        acl=ClientACL([ipaddress.ip_network("127.0.0.1/32")]),
+        rate_limiter=RateLimiter(rate_rps=10000.0, burst=20000.0),
+        filter_engine=engine,
+        cache=DNSCache(),
+        upstreams=[fake.address],
+        upstream_timeout=2.0,
+        block_mode="NULL",
+    )
+    handles = None
+    for _attempt in range(5):
+        try:
+            handles = await start_dns_servers(cfg, "127.0.0.1", fixed_port)
+            break
+        except OSError:
+            await asyncio.sleep(0.05)
+    if handles is None:
+        raise OSError("could not bind the rebind-test resolver")
+    udp = handles.udp
+    port_before = udp.port
+    old_transport = udp.transport
+    try:
+        await udp.rebind()
+        assert udp.transport is not old_transport
+        assert udp.port == port_before  # same explicit port after rebind
+        resp = dns.message.from_wire(await _udp_exchange(port_before, dns.message.make_query("ads.srv.com.", "A").to_wire()))
+        assert resp.answer[0][0].to_text() == "0.0.0.0"
+    finally:
+        if udp.transport is not None:
+            udp.transport.close()
+        handles.tcp.close()
+        await handles.tcp.wait_closed()
         await fake.stop()

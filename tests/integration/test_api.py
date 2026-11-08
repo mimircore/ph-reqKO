@@ -33,6 +33,7 @@ from reqko.dns.protocol import (
     parse_wire,
 )
 from reqko.dns.ratelimit import RateLimiter
+from reqko.dns.server import DnsProbeStatus
 from reqko.filtering.engine import FilterEngine, FilterSnapshot
 from reqko.filtering.rules import RuleManager
 from reqko.storage.migrations import init_database
@@ -1273,3 +1274,49 @@ def test_suggestions_auto_mode_off_by_default() -> None:
 
     cfg = Config.from_env({"REQKO_SUGGEST_AUTO_APPROVE_SCORE": "5"})
     assert cfg.suggest_auto_approve_score == 5
+
+
+# ── /health: UDP self-probe watchdog (Windows 10054 hardening) ─────────────────
+
+
+async def test_health_self_probe_null_when_disabled() -> None:
+    """Without the watchdog (default in tests) self_probe is null."""
+    conn = init_database(":memory:")
+    state = _state(conn)
+    assert state.dns_probe is None
+    client = await _start(state)
+    try:
+        resp = await client.get("/health")
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["self_probe"] is None
+    finally:
+        await client.close()
+
+
+async def test_health_exposes_self_probe_status_and_lag() -> None:
+    conn = init_database(":memory:")
+    state = _state(conn)
+    state.dns_probe = DnsProbeStatus(
+        last_probe_ok="2026-11-08 20:00:00",
+        consecutive_failures=0,
+        event_loop_lag_ms=1.25,
+    )
+    client = await _start(state)
+    try:
+        resp = await client.get("/health")
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["self_probe"] == {
+            "last_probe_ok": "2026-11-08 20:00:00",
+            "consecutive_failures": 0,
+            "event_loop_lag_ms": 1.2,  # round(1.25, 1) -> 1.2 (banker rounding)
+        }
+
+        # Failure counters are reported verbatim for alerting
+        state.dns_probe.consecutive_failures = 2
+        resp = await client.get("/health")
+        body = await resp.json()
+        assert body["self_probe"]["consecutive_failures"] == 2
+    finally:
+        await client.close()
