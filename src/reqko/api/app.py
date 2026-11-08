@@ -15,7 +15,7 @@ from reqko.api.auth import AuthFailureLimiter, TokenStore
 from reqko.config import Config
 from reqko.dns.pipeline import QueryEvent
 from reqko.dns.ratelimit import RateLimiter
-from reqko.dns.server import DnsProbeStatus
+from reqko.dns.server import DnsProbeStatus, LoopLagMonitor
 from reqko.filtering.engine import FilterEngine
 from reqko.filtering.rules import RuleManager
 
@@ -106,6 +106,8 @@ class ApiState:
     update_task: asyncio.Task[None] | None = None
     # UDP self-probe watchdog state (Windows 10054 hardening); None = disabled
     dns_probe: DnsProbeStatus | None = None
+    # Event-loop lag monitor (sleep-drift, max over the last minute)
+    loop_lag: LoopLagMonitor | None = None
 
 
 # Typed application/request keys (aiohttp best practice, silences warnings).

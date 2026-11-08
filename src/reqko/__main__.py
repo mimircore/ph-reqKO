@@ -23,6 +23,7 @@ from reqko.dns.server import (
     PROBE_INTERVAL_SECONDS,
     DnsProbeStatus,
     DnsUdpWatchdog,
+    LoopLagMonitor,
     start_dns_servers,
 )
 from reqko.filtering.engine import FilterEngine
@@ -215,6 +216,11 @@ async def _run(config: Config) -> None:
         config.block_mode,
     )
 
+    # ── Event-loop lag monitor (perf-latency): sleep(0.1) drift, /health max ─
+    loop_lag = LoopLagMonitor()
+    lag_stop = asyncio.Event()
+    lag_task = asyncio.create_task(loop_lag.run(lag_stop), name="loop-lag")
+
     # ── REST API (same event loop) ──────────────────────────────────────────
     state = ApiState(
         cfg=config,
@@ -233,6 +239,7 @@ async def _run(config: Config) -> None:
         report_limiter=RateLimiter(rate_rps=2.0, burst=60.0),
         allowed_local_dirs=allowed_dirs,
         dns_probe=dns_probe,
+        loop_lag=loop_lag,
     )
     app = create_app(state)
     access_log = logging.getLogger("reqko.access") if logger.isEnabledFor(logging.DEBUG) else None
@@ -281,6 +288,8 @@ async def _run(config: Config) -> None:
     await dns_handles.tcp.wait_closed()
 
     # Flush the accepted query events before closing the DB
+    lag_stop.set()
+    await lag_task
     watchdog_stop.set()
     if watchdog_task is not None:
         await watchdog_task

@@ -88,8 +88,13 @@
     el("tile-blocked").textContent = data.blocked_percentage + "%";
     el("tile-cache").textContent = data.cache_hit_percentage + "%";
     el("tile-browser").textContent = String(data.browser_blocked);
+    /* Headline latency is the upstream p95 — the mean is skewed by rare
+       upstream-failure outliers (perf-latency). */
+    var upstreamLatency = data.latency_ms && data.latency_ms.upstream;
     el("tile-latency").textContent =
-      data.avg_latency_ms === null ? "–" : data.avg_latency_ms + " ms";
+      upstreamLatency && upstreamLatency.samples > 0
+        ? upstreamLatency.p95 + " ms"
+        : "–";
   }
 
   /* ── suggested domains (adaptive discovery) ── */

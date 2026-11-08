@@ -28,6 +28,7 @@ import socket
 import struct
 import sys
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Protocol
@@ -214,7 +215,33 @@ class DnsProbeStatus:
 
     last_probe_ok: str | None = None
     consecutive_failures: int = 0
-    event_loop_lag_ms: float | None = None
+
+
+class LoopLagMonitor:
+    """Event-loop lag monitor: sleep(interval) drift sampled continuously.
+
+    GET /health reports ``event_loop_lag_ms`` as the MAX over the last
+    ``window_seconds`` (interval 0.1 s -> 600 samples/minute) — sustained
+    drift is how a blocked/starved event loop becomes visible.
+    """
+
+    def __init__(self, interval: float = 0.1, window_seconds: float = 60.0) -> None:
+        self._interval = interval
+        self._samples: deque[float] = deque(
+            maxlen=max(1, int(window_seconds / interval))
+        )
+
+    async def run(self, stop_event: asyncio.Event) -> None:
+        while not stop_event.is_set():
+            started = time.monotonic()
+            await asyncio.sleep(self._interval)
+            self._samples.append(
+                max(0.0, (time.monotonic() - started - self._interval) * 1000.0)
+            )
+
+    @property
+    def max_lag_ms(self) -> float | None:
+        return max(self._samples) if self._samples else None
 
 
 class ProbeTarget(Protocol):
@@ -277,10 +304,6 @@ class DnsUdpWatchdog:
                         logger.exception("UDP endpoint rebind failed")
             delay = max(0.0, self._interval - (time.monotonic() - started))
             await asyncio.sleep(delay)
-            # Loop-lag probe: by how much did the cycle overrun its interval?
-            self._status.event_loop_lag_ms = round(
-                max(0.0, (time.monotonic() - started - self._interval) * 1000.0), 1
-            )
 
     async def _probe_once(self) -> bool:
         query_id = 0x524B  # "RK"

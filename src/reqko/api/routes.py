@@ -11,6 +11,7 @@ import datetime
 import hashlib
 import json
 import logging
+import math
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -194,12 +195,12 @@ async def handle_health(request: web.Request) -> web.Response:
     # UDP self-probe watchdog (None when disabled, e.g. tests or non-loopback bind)
     probe_body: dict[str, Any] | None = None
     if state.dns_probe is not None:
-        lag = state.dns_probe.event_loop_lag_ms
         probe_body = {
             "last_probe_ok": state.dns_probe.last_probe_ok,
             "consecutive_failures": state.dns_probe.consecutive_failures,
-            "event_loop_lag_ms": round(lag, 1) if lag is not None else None,
         }
+    # Event-loop lag: max sleep(0.1) drift over the last minute (perf-latency)
+    lag = state.loop_lag.max_lag_ms if state.loop_lag is not None else None
     body = {
         "status": "ok" if db_ok else "degraded",
         "uptime_seconds": round(time.monotonic() - state.started_at, 3),
@@ -215,6 +216,7 @@ async def handle_health(request: web.Request) -> web.Response:
             "dropped_events": state.drop_counter[0],
         },
         "self_probe": probe_body,
+        "event_loop_lag_ms": round(lag, 1) if lag is not None else None,
     }
     return web.json_response(body, status=200 if db_ok else 503)
 
@@ -233,6 +235,30 @@ async def handle_ready(request: web.Request) -> web.Response:
 
 
 # ── statistics (FR-11/FR-15) ───────────────────────────────────────────────────
+
+
+def _percentile(sorted_values: list[float], p: float) -> float:
+    """Linear-interpolated percentile of an ascending list (numpy-style)."""
+    if not sorted_values:
+        return 0.0
+    k = (len(sorted_values) - 1) * p / 100.0
+    lo = math.floor(k)
+    hi = math.ceil(k)
+    if lo == hi:
+        return sorted_values[int(k)]
+    return sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * (k - lo)
+
+
+def _latency_percentiles(values: list[float]) -> dict[str, Any]:
+    """p50/p95/p99/max/samples block for one latency group."""
+    values_sorted = sorted(values)
+    return {
+        "p50": round(_percentile(values_sorted, 50), 3),
+        "p95": round(_percentile(values_sorted, 95), 3),
+        "p99": round(_percentile(values_sorted, 99), 3),
+        "max": round(values_sorted[-1], 3) if values_sorted else 0.0,
+        "samples": len(values_sorted),
+    }
 
 
 async def handle_stats_summary(request: web.Request) -> web.Response:
@@ -256,9 +282,37 @@ async def handle_stats_summary(request: web.Request) -> web.Response:
     """
     sql_params: list[Any] = [*_BLOCKED_STATUSES, *params]
 
+    # Latency percentiles are grouped by what the latency MEANS (perf-latency):
+    # upstream = FORWARDED + ERROR_UPSTREAM (real upstream round trips,
+    # including the failure tail); cached and blocked are reported separately
+    # and never dilute or hide the upstream numbers. The mean stays only for
+    # backwards compatibility and is no longer the headline number.
+    latency_groups: dict[str, str] = {
+        "upstream": "status IN ('FORWARDED', 'ERROR_UPSTREAM')",
+        "cached": "status = 'CACHED'",
+        "blocked": "status LIKE 'BLOCKED%'",
+    }
+    latency_sql = {
+        group: (
+            f"SELECT latency_ms FROM query_log {where} AND {condition}"
+            if where
+            else f"SELECT latency_ms FROM query_log WHERE {condition}"
+        )
+        for group, condition in latency_groups.items()
+    }
+
     def _query() -> dict[str, Any]:
         row = state.read_conn.execute(sql, sql_params).fetchone()
-        return dict(row) if row is not None else {}
+        result = dict(row) if row is not None else {}
+        result["_latency"] = {
+            group: [
+                float(r[0])
+                for r in state.read_conn.execute(group_sql, params).fetchall()
+                if r[0] is not None
+            ]
+            for group, group_sql in latency_sql.items()
+        }
+        return result
 
     row = await _in_executor(_query)
     total = int(row.get("total") or 0)
@@ -278,7 +332,13 @@ async def handle_stats_summary(request: web.Request) -> web.Response:
         "refused_queries": int(row.get("refused") or 0),
         "error_queries": int(row.get("errors") or 0),
         "browser_blocked": int(row.get("browser_blocked") or 0),
+        # Legacy mean (skewed by rare upstream-failure outliers) — kept for
+        # compatibility only; the headline latency is latency_ms.upstream.p95.
         "avg_latency_ms": round(float(avg_latency), 3) if avg_latency is not None else None,
+        "latency_ms": {
+            group: _latency_percentiles(values)
+            for group, values in row["_latency"].items()
+        },
     }
     return web.json_response(body)
 
