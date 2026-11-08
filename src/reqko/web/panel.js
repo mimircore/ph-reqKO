@@ -90,6 +90,104 @@
       data.avg_latency_ms === null ? "–" : data.avg_latency_ms + " ms";
   }
 
+  /* ── suggested domains (adaptive discovery) ── */
+
+  var ADMIN_KEY = "reqko_admin_token";
+
+  function getAdminToken() {
+    return window.sessionStorage.getItem(ADMIN_KEY);
+  }
+
+  function adminFetch(path, method) {
+    return fetch(path, {
+      method: method || "GET",
+      headers: { Authorization: "Bearer " + getAdminToken() },
+    }).then(function (resp) {
+      if (resp.status === 401 || resp.status === 403) {
+        var err = new Error("forbidden");
+        err.forbidden = true;
+        throw err;
+      }
+      if (!resp.ok) throw new Error("HTTP " + resp.status + " for " + path);
+      return resp.json();
+    });
+  }
+
+  function renderSuggestions(rows) {
+    var list = el("suggestions-list");
+    list.textContent = "";
+    if (rows.length === 0) {
+      var empty = document.createElement("p");
+      empty.className = "muted";
+      empty.textContent = "No suggested domains yet.";
+      list.appendChild(empty);
+      return;
+    }
+    var adminToken = getAdminToken();
+    rows.forEach(function (row) {
+      var item = document.createElement("div");
+      item.className = "suggestion-row";
+      var name = document.createElement("span");
+      name.className = "suggestion-domain";
+      name.textContent = row.domain;
+      var meta = document.createElement("span");
+      meta.className = "muted";
+      meta.textContent = "score " + row.score + " \u00b7 " + row.reasons.join(", ")
+        + " \u00b7 hits " + row.hits + (row.auto ? " \u00b7 auto" : "");
+      var actions = document.createElement("span");
+      actions.className = "suggestion-actions";
+      if (adminToken) {
+        var approve = document.createElement("button");
+        approve.type = "button";
+        approve.textContent = "Approve";
+        approve.addEventListener("click", function () {
+          decideSuggestion(row.domain, "approve");
+        });
+        var reject = document.createElement("button");
+        reject.type = "button";
+        reject.textContent = "Reject";
+        reject.addEventListener("click", function () {
+          decideSuggestion(row.domain, "reject");
+        });
+        actions.appendChild(approve);
+        actions.appendChild(reject);
+      }
+      item.appendChild(name);
+      item.appendChild(meta);
+      item.appendChild(actions);
+      list.appendChild(item);
+    });
+  }
+
+  function refreshSuggestions() {
+    el("suggestions-card").hidden = false;
+    var adminToken = getAdminToken();
+    el("suggestions-admin").hidden = Boolean(adminToken);
+    return apiFetch("/api/v1/suggestions?status=pending")
+      .then(function (data) { renderSuggestions(data.suggestions || []); })
+      .catch(function (err) {
+        if (err.unauthorized) throw err;
+        showError("error-suggestions", "Failed to load suggestions: " + err.message);
+      });
+  }
+
+  function decideSuggestion(domain, decision) {
+    adminFetch("/api/v1/suggestions/" + encodeURIComponent(domain) + "/" + decision, "POST")
+      .then(function () { return refreshSuggestions(); })
+      .catch(function (err) {
+        showError("error-suggestions", "Failed to " + decision + ": " + err.message);
+      });
+  }
+
+  el("save-admin-token").addEventListener("click", function () {
+    var value = el("admin-token-input").value.trim();
+    if (value) {
+      window.sessionStorage.setItem(ADMIN_KEY, value);
+      el("admin-token-input").value = "";
+      refreshSuggestions();
+    }
+  });
+
   /* ── time series line chart (total vs blocked) ─────────────────────────── */
 
   function drawTimeseries(series) {
@@ -300,7 +398,12 @@
           "auto-refresh every " + REFRESH_MS / 1000 + " s · updated " +
           new Date().toLocaleTimeString();
         renderSummary(data);
-        return Promise.allSettled([refreshTimeseries(), refreshTopDomains(), refreshTopClients()]);
+        return Promise.allSettled([
+          refreshTimeseries(),
+          refreshTopDomains(),
+          refreshTopClients(),
+          refreshSuggestions(),
+        ]);
       })
       .catch(function (err) {
         if (err.unauthorized) {

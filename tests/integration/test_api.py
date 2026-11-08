@@ -1076,3 +1076,200 @@ async def test_extension_rules_limit_raised_for_packed_lists() -> None:
         assert body["domains"] == sorted(body["domains"])
     finally:
         await client.close()
+
+
+# ── domain suggestions (adaptive discovery) ────────────────────────────────────
+
+
+def _seed_suggestion(
+    conn: sqlite3.Connection, domain: str, base: str, score: int = 5
+) -> None:
+    from reqko.filtering.suggester import Suggestion, save_suggestions
+
+    save_suggestions(
+        conn,
+        [
+            Suggestion(
+                domain=domain, base=base, score=score, reasons=["keyword:ads"],
+                hits=3, first_seen=1000.0, last_seen=2000.0,
+            )
+        ],
+    )
+
+
+async def test_approve_adds_rule_that_changes_next_dns_answer() -> None:
+    """Approving a suggestion installs a real blocklist rule: the very next
+    DNS query for the domain is blocked instead of forwarded."""
+    conn = init_database(":memory:")
+    state = _state(conn)
+    client = await _start(state)
+
+    pipeline_cfg = PipelineConfig(
+        acl=ClientACL([ipaddress.ip_network("127.0.0.0/8")]),
+        rate_limiter=RateLimiter(rate_rps=10000.0, burst=20000.0),
+        filter_engine=state.engine,
+        cache=DNSCache(),
+        upstreams=[("127.0.0.1", 1)],
+        upstream_timeout=0.1,
+        block_mode="NULL",
+    )
+
+    def _dns_query(name: str, qid: int) -> bytes:
+        return DNSPacket(
+            header=DNSHeader(id=qid, qr=0, rd=1),
+            questions=[DNSQuestion(name=name, qtype=TYPE_A)],
+        ).to_wire()
+
+    fake_resp = DNSPacket(
+        header=DNSHeader(id=1, qr=1, ra=1),
+        questions=[DNSQuestion(name="ads-test.example", qtype=TYPE_A)],
+        answers=[DNSRecord("ads-test.example", TYPE_A, CLASS_IN, 300, "9.9.9.9")],
+    )
+    mock = AsyncMock(return_value=(fake_resp, "127.0.0.1:53"))
+
+    try:
+        _seed_suggestion(conn, "ads-test.example", "ads-test.example")
+
+        with patch("reqko.dns.pipeline.query_upstream", new=mock):
+            before = parse_wire(
+                await process_query(
+                    _dns_query("ads-test.example", 1), "127.0.0.1", pipeline_cfg
+                )
+            )
+        assert before.answers[0].rdata == "9.9.9.9"  # not blocked yet
+
+        resp = await client.post(
+            "/api/v1/suggestions/ads-test.example/approve", headers=AUTH
+        )
+        assert resp.status == 200
+        assert await resp.json() == {
+            "status": "approved",
+            "domain": "ads-test.example",
+        }
+
+        after = parse_wire(
+            await process_query(
+                _dns_query("ads-test.example", 2), "127.0.0.1", pipeline_cfg
+            )
+        )
+        assert after.answers[0].rdata == "0.0.0.0"  # blocked by the approved rule
+
+        # Listed as approved; a manual decision is never marked auto
+        resp = await client.get("/api/v1/suggestions?status=approved", headers=AUTH)
+        assert resp.status == 200
+        rows = (await resp.json())["suggestions"]
+        assert any(
+            s["domain"] == "ads-test.example" and s["auto"] is False for s in rows
+        )
+    finally:
+        await client.close()
+
+
+async def test_suggestion_decide_validation() -> None:
+    conn = init_database(":memory:")
+    state = _state(conn)
+    client = await _start(state)
+    try:
+        # Unknown decision action -> 404
+        resp = await client.post("/api/v1/suggestions/x.example/frob", headers=AUTH)
+        assert resp.status == 404
+
+        # No suggestion for the domain -> 404 and NO blocklist rule installed
+        resp = await client.post(
+            "/api/v1/suggestions/ghost.example/approve", headers=AUTH
+        )
+        assert resp.status == 404
+        assert state.engine.match("ghost.example").is_blocked is False
+
+        # Invalid list status -> 400
+        resp = await client.get("/api/v1/suggestions?status=bogus", headers=AUTH)
+        assert resp.status == 400
+    finally:
+        await client.close()
+
+
+async def test_analyze_writes_suggestions_and_reject_is_remembered() -> None:
+    conn = init_database(":memory:")
+    state = _state(conn)
+    client = await _start(state)
+    try:
+        # Two FORWARDED queries per domain inside the 24h window (min_hits=2)
+        for name in ("fresh-ads.example", "reject-me.example"):
+            for _ in range(2):
+                conn.execute(
+                    "INSERT INTO query_log (client_ip, question_name, "
+                    "question_type, status, latency_ms, response_code) "
+                    "VALUES ('10.0.0.1', ?, 'A', 'FORWARDED', 1.0, 0)",
+                    (name,),
+                )
+        conn.commit()
+
+        _seed_suggestion(conn, "reject-me.example", "reject-me.example")
+        resp = await client.post(
+            "/api/v1/suggestions/reject-me.example/reject", headers=AUTH
+        )
+        assert resp.status == 200
+        assert (await resp.json())["status"] == "rejected"
+
+        resp = await client.post("/api/v1/suggestions/analyze", headers=AUTH)
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["status"] == "analyzed"
+        # fresh-ads.example is new; reject-me.example is remembered as rejected
+        assert body["suggestions_written"] == 1
+
+        resp = await client.get("/api/v1/suggestions?status=pending", headers=AUTH)
+        assert resp.status == 200
+        domains = [s["domain"] for s in (await resp.json())["suggestions"]]
+        assert "fresh-ads.example" in domains
+        assert "reject-me.example" not in domains
+    finally:
+        await client.close()
+
+
+async def test_suggestion_scopes_read_can_list_admin_can_decide() -> None:
+    conn = init_database(":memory:")
+    state = _state(conn, read_token=READ_TOKEN)
+    _seed_suggestion(conn, "scoped.example", "scoped.example")
+    client = await _start(state)
+    try:
+        # read scope: can list
+        resp = await client.get(
+            "/api/v1/suggestions?status=pending",
+            headers={"Authorization": f"Bearer {READ_TOKEN}"},
+        )
+        assert resp.status == 200
+        assert len((await resp.json())["suggestions"]) == 1
+
+        # read scope: cannot analyze/approve/reject
+        for method, path in (
+            ("POST", "/api/v1/suggestions/analyze"),
+            ("POST", "/api/v1/suggestions/scoped.example/approve"),
+            ("POST", "/api/v1/suggestions/scoped.example/reject"),
+        ):
+            resp = await client.request(
+                method, path, headers={"Authorization": f"Bearer {READ_TOKEN}"}
+            )
+            assert resp.status == 403, f"{method} {path}: {resp.status}"
+
+        # admin: analyze + decide work
+        resp = await client.post("/api/v1/suggestions/analyze", headers=AUTH)
+        assert resp.status == 200
+        resp = await client.post(
+            "/api/v1/suggestions/scoped.example/approve", headers=AUTH
+        )
+        assert resp.status == 200
+    finally:
+        await client.close()
+
+
+def test_suggestions_auto_mode_off_by_default() -> None:
+    """REQKO_SUGGEST_AUTO_APPROVE_SCORE unset -> manual review (None)."""
+    cfg = Config.from_env({"REQKO_ADMIN_TOKEN": "x"})
+    assert cfg.suggest_auto_approve_score is None
+    assert cfg.suggest_window_hours == 24
+    assert cfg.suggest_min_hits == 2
+    assert cfg.suggest_interval_minutes == 15
+
+    cfg = Config.from_env({"REQKO_SUGGEST_AUTO_APPROVE_SCORE": "5"})
+    assert cfg.suggest_auto_approve_score == 5

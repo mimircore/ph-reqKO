@@ -30,6 +30,11 @@ from reqko.api.cosmetic import load_selectors
 from reqko.dns.pipeline import QueryEvent
 from reqko.dns.upstream import probe_upstream
 from reqko.filtering.parser import normalize_domain
+from reqko.filtering.suggester import (
+    fetch_suggestions,
+    run_analysis_once,
+    set_suggestion_status,
+)
 from reqko.filtering.updater import update_filter_engine
 
 logger = logging.getLogger(__name__)
@@ -718,6 +723,77 @@ async def handle_extension_cosmetic(request: web.Request) -> web.Response:
     )
 
 
+
+
+# ── domain suggestions (adaptive discovery) ─────────────────────────────
+
+
+async def handle_suggestions_list(request: web.Request) -> web.Response:
+    state: ApiState = request.app[STATE_KEY]
+    status = request.query.get("status", "pending")
+    if status not in ("pending", "approved", "rejected"):
+        raise ApiProblem(
+            400, "Bad Request", detail="Invalid status: must be pending, approved, or rejected."
+        )
+    limit = _parse_limit(request, default=50, maximum=500)
+
+    def _query() -> list[dict[str, Any]]:
+        return fetch_suggestions(state.read_conn, status, limit)
+
+    rows = await _in_executor(_query)
+    return web.json_response({"status": status, "suggestions": rows})
+
+
+async def handle_suggestions_analyze(request: web.Request) -> web.Response:
+    state: ApiState = request.app[STATE_KEY]
+    loop = asyncio.get_running_loop()
+    written = await run_analysis_once(
+        state.read_conn,
+        state.engine,
+        state.rule_manager,
+        loop,
+        window_hours=state.cfg.suggest_window_hours,
+        min_hits=state.cfg.suggest_min_hits,
+        auto_approve_score=state.cfg.suggest_auto_approve_score,
+    )
+    return web.json_response({"status": "analyzed", "suggestions_written": written})
+
+
+async def handle_suggestion_decide(request: web.Request) -> web.Response:
+    state: ApiState = request.app[STATE_KEY]
+    domain = request.match_info["domain"]
+    decision = request.match_info["decision"]
+    if decision not in ("approve", "reject"):
+        raise ApiProblem(404, "Not Found", detail="Unknown decision action.")
+
+    status = "approved" if decision == "approve" else "rejected"
+
+    def _exists() -> bool:
+        cur = state.read_conn.execute(
+            "SELECT 1 FROM domain_suggestions WHERE domain = ?", (domain,)
+        )
+        return cur.fetchone() is not None
+
+    # Existence first: a 404 must not leave a blocklist rule behind
+    if not await _in_executor(_exists):
+        raise ApiProblem(404, "Not Found", detail=f"No suggestion for '{domain}'.")
+
+    if decision == "approve":
+        def _approve() -> None:
+            state.rule_manager.add_rule("blacklist", domain, syntax="exact")
+
+        try:
+            await _in_executor(_approve)
+        except ValueError as exc:
+            raise ApiProblem(400, "Bad Request", detail=str(exc)) from None
+
+    def _mark() -> bool:
+        return set_suggestion_status(state.read_conn, domain, status)
+
+    await _in_executor(_mark)
+    return web.json_response({"status": status, "domain": domain})
+
+
 # ── web panel (FR-18) ──────────────────────────────────────────────────────────
 
 
@@ -765,6 +841,9 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/api/v1/blocklist/custom", handle_blocklist_post)
     app.router.add_delete("/api/v1/blocklist/custom/{domain}", handle_blocklist_delete)
     app.router.add_post("/api/v1/blocklists/update", handle_blocklists_update)
+    app.router.add_get("/api/v1/suggestions", handle_suggestions_list)
+    app.router.add_post("/api/v1/suggestions/analyze", handle_suggestions_analyze)
+    app.router.add_post("/api/v1/suggestions/{domain}/{decision}", handle_suggestion_decide)
     app.router.add_get("/api/v1/extension/rules", handle_extension_rules)
     app.router.add_get("/api/v1/extension/cosmetic", handle_extension_cosmetic)
     app.router.add_post("/api/v1/extension/report", handle_extension_report)
