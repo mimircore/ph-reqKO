@@ -22,7 +22,8 @@ from reqko.dns.ratelimit import RateLimiter
 from reqko.dns.server import run_dns_servers
 from reqko.filtering.engine import FilterEngine
 from reqko.filtering.rules import RuleManager
-from reqko.filtering.updater import update_filter_engine
+from reqko.filtering.suggester import run_suggestion_scheduler
+from reqko.filtering.updater import run_blocklist_refresh, update_filter_engine
 from reqko.storage.migrations import get_db_connection, init_database
 from reqko.storage.retention import RetentionJob
 from reqko.storage.settings import get_setting, set_setting
@@ -124,6 +125,32 @@ async def _run(config: Config) -> None:
     writer_task = asyncio.create_task(writer.run(queue), name="query-log-writer")
     retention = RetentionJob(retention_conn, retention_days=config.log_retention_days)
     retention_task = asyncio.create_task(retention.run_forever(), name="retention")
+    stop_event = asyncio.Event()
+    suggest_stop = asyncio.Event()
+    suggest_task: asyncio.Task[int] | None = None
+    if config.suggest_interval_minutes > 0:
+        suggest_task = asyncio.create_task(
+            run_suggestion_scheduler(
+                conn,
+                engine,
+                rule_manager,
+                window_hours=config.suggest_window_hours,
+                min_hits=config.suggest_min_hits,
+                interval_minutes=config.suggest_interval_minutes,
+                auto_approve_score=config.suggest_auto_approve_score,
+                stop_event=suggest_stop,
+            ),
+            name="domain-suggestions",
+        )
+    refresh_stop = asyncio.Event()
+    refresh_task: asyncio.Task[None] | None = None
+    if config.blocklist_refresh_hours > 0 and config.blocklist_urls:
+        refresh_task = asyncio.create_task(
+            run_blocklist_refresh(
+                config, engine, rule_manager, refresh_stop, allowed_dirs
+            ),
+            name="blocklist-refresh",
+        )
 
     # ── DNS servers ─────────────────────────────────────────────────────────
     acl = ClientACL(config.allowed_networks)
@@ -226,6 +253,12 @@ async def _run(config: Config) -> None:
     await tcp_server.wait_closed()
 
     # Flush the accepted query events before closing the DB
+    suggest_stop.set()
+    if suggest_task is not None:
+        await suggest_task
+    refresh_stop.set()
+    if refresh_task is not None:
+        await refresh_task
     await writer.stop()
     await writer_task
     await retention.stop()

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 import aiohttp
 
@@ -25,12 +27,24 @@ class UpdaterError(Exception):
     """Raised when list update fails and no fallback is available."""
 
 
-async def _download_url(url: str, timeout: float = 30.0) -> str:
-    """Downloads text content from HTTP/HTTPS URL."""
+async def _download_url(
+    url: str, timeout: float = 30.0, etag: str | None = None
+) -> tuple[str | None, str | None]:
+    """Downloads text content from HTTP/HTTPS URL.
+
+    Sends If-None-Match when an etag is given. Returns (content, etag);
+    content is None on HTTP 304 (unchanged) so callers keep last good lists.
+    """
+    headers = {"If-None-Match": etag} if etag else {}
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+        async with session.get(
+            url, timeout=aiohttp.ClientTimeout(total=timeout), headers=headers
+        ) as resp:
+            if resp.status == 304:
+                return None, etag
             resp.raise_for_status()
-            return await resp.text(encoding="utf-8", errors="replace")
+            content = await resp.text(encoding="utf-8", errors="replace")
+            return content, resp.headers.get("ETag")
 
 
 def _read_local_file(path: str, allowed_dirs: Sequence[str]) -> str:
@@ -52,12 +66,17 @@ def _read_local_file(path: str, allowed_dirs: Sequence[str]) -> str:
 async def fetch_list(
     url: str,
     allowed_local_dirs: Sequence[str] = DEFAULT_ALLOWED_LIST_DIRS,
-) -> str:
-    """Fetches a blocklist by URL or file path."""
+    etag: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Fetches a blocklist by URL or file path.
+
+    Returns (content, etag); content is None when the server reports 304
+    Not Modified (remote URL sources only).
+    """
     parsed = urllib.parse.urlparse(url)
     scheme = parsed.scheme.lower()
     if scheme in ("http", "https"):
-        return await _download_url(url)
+        return await _download_url(url, etag=etag)
     if scheme in ("file", "") or len(scheme) == 1:
         # len(scheme) == 1 covers Windows drive letters: urlparse("C:\\x")
         # reports scheme "c". For the file scheme, convert the URL path part
@@ -67,7 +86,10 @@ async def fetch_list(
         else:
             path = url
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, _read_local_file, path, allowed_local_dirs)
+        content = await loop.run_in_executor(
+            None, _read_local_file, path, allowed_local_dirs
+        )
+        return content, None
     raise UpdaterError(f"Unsupported URL scheme: {parsed.scheme}")
 
 
@@ -83,24 +105,42 @@ async def update_filter_engine(
     version: int = 1,
     on_success: Callable[[int, int], None] | None = None,
     allowed_local_dirs: Sequence[str] = DEFAULT_ALLOWED_LIST_DIRS,
+    etags: dict[str, str] | None = None,
 ) -> FilterSnapshot:
     """Downloads all lists, merges rules, and atomically swaps the engine snapshot.
 
-    Falls back to the existing snapshot on failure (FR-10).
+    Falls back to the existing snapshot on failure (FR-10). ``etags`` is an
+    optional mutable {url: etag} map read/updated in place for ETag-based
+    conditional fetches (If-None-Match; 304 keeps last good lists).
     """
     if not list_urls:
         logger.warning("No blocklist URLs configured, skipping update")
         return engine.snapshot
+    etag_map = etags if etags is not None else {}
 
     loop = asyncio.get_running_loop()
     merged_lines: list[str] = []
+    new_etags: dict[str, str | None] = {}
+    failures = 0
+    unchanged = 0
 
     for url in list_urls:
         try:
-            content = await fetch_list(url, allowed_local_dirs=allowed_local_dirs)
+            content, etag = await fetch_list(
+                url, allowed_local_dirs=allowed_local_dirs, etag=etag_map.get(url)
+            )
+            if content is None:
+                # 304 Not Modified: last good list stays
+                new_etags[url] = etag or ""
+                unchanged += 1
+                logger.info("Blocklist %s unchanged (304), keeping current rules", url)
+                continue
+            if etag:
+                new_etags[url] = etag
             merged_lines.extend(content.splitlines())
             logger.info("Loaded blocklist: %s (%d lines)", url, len(content.splitlines()))
         except Exception as e:
+            failures += 1
             # Log the exception type and HTTP status (if any) instead of
             # formatting the exception object: some aiohttp exceptions crash
             # when interpolated into a message.
@@ -112,7 +152,14 @@ async def update_filter_engine(
             )
             # Continue with other sources
 
+    if etags is not None:
+        etags.clear()
+        etags.update({k: v for k, v in new_etags.items() if v})
+
     if not merged_lines:
+        if unchanged == len(list_urls):
+            logger.info("All blocklist sources unchanged (304), keeping current rules")
+            return engine.snapshot
         logger.error("All blocklist sources failed, keeping existing rules (FR-10 fallback)")
         return engine.snapshot
 
@@ -154,3 +201,74 @@ async def update_filter_engine(
         on_success(version, new_snapshot.rules_count)
 
     return new_snapshot
+
+
+async def run_blocklist_refresh(
+    config: Any,
+    engine: FilterEngine,
+    rule_manager: Any,
+    stop_event: asyncio.Event,
+    allowed_local_dirs: Sequence[str],
+    etags_store: Any = None,
+) -> None:
+    """Periodic blocklist URL refresh (REQKO_BLOCKLIST_REFRESH_HOURS).
+
+    0 disables. Uses ETag/If-None-Match (etags persisted via etags_store
+    get/set callables) and keeps last good lists on any failure (FR-10).
+    """
+    if config.blocklist_refresh_hours <= 0 or not config.blocklist_urls:
+        return
+    loop = asyncio.get_running_loop()
+    interval_seconds = config.blocklist_refresh_hours * 3600.0
+    etags: dict[str, str] = {}
+    if etags_store is not None:
+        try:
+            stored = await loop.run_in_executor(None, etags_store.get, "blocklist_etags")
+            if stored:
+                etags.update(json.loads(stored))
+        except Exception:
+            logger.debug("could not load stored blocklist etags", exc_info=True)
+
+    while not stop_event.is_set():
+        slept = 0.0
+        while slept < interval_seconds and not stop_event.is_set():
+            delay = min(1.0, interval_seconds - slept)
+            await asyncio.sleep(delay)
+            slept += delay
+        if stop_event.is_set():
+            return
+        await _refresh_once(
+            config, engine, rule_manager, loop, allowed_local_dirs, etags, etags_store
+        )
+
+
+async def _refresh_once(
+    config: Any,
+    engine: FilterEngine,
+    rule_manager: Any,
+    loop: asyncio.AbstractEventLoop,
+    allowed_local_dirs: Sequence[str],
+    etags: dict[str, str],
+    etags_store: Any,
+) -> None:
+    """One refresh iteration: reload the URLs, swap the base snapshot and
+    persist the etag map (kept separate so the interval loop stays thin)."""
+    try:
+        version = engine.snapshot.version + 1
+        snapshot = await update_filter_engine(
+            engine,
+            config.blocklist_urls,
+            version=version,
+            allowed_local_dirs=allowed_local_dirs,
+            etags=etags,
+        )
+        rule_manager.set_base(snapshot)
+        if etags_store is not None and etags:
+            await loop.run_in_executor(
+                None,
+                etags_store.set,
+                "blocklist_etags",
+                json.dumps(etags),
+            )
+    except Exception:
+        logger.exception("blocklist refresh iteration failed")

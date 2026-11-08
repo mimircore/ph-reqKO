@@ -87,6 +87,15 @@ class Config:
     # Per-IP failed-auth rate limiting on the API.
     auth_failure_limit: int = 10
     auth_failure_window: float = 60.0
+    # Adaptive ad-domain discovery (query-log analysis). interval 0 disables
+    # the background scheduler; auto-approve threshold empty = manual review.
+    suggest_window_hours: int = 24
+    suggest_min_hits: int = 2
+    suggest_interval_minutes: int = 15
+    suggest_auto_approve_score: int | None = None
+    # Periodic blocklist URL refresh (hours; 0 disables). Uses ETag/
+    # If-Modified-Since and keeps last good lists on failure.
+    blocklist_refresh_hours: int = 24
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> Config:
@@ -254,6 +263,49 @@ class Config:
                 f"{env.get('REQKO_AUTH_FAILURE_WINDOW')}. Must be positive float."
             ) from err
 
+        # 15. Adaptive ad-domain suggestions
+        suggest_window_hours = _parse_positive_int(
+            env.get("REQKO_SUGGEST_WINDOW_HOURS", "24"), "REQKO_SUGGEST_WINDOW_HOURS"
+        )
+        suggest_min_hits = _parse_positive_int(
+            env.get("REQKO_SUGGEST_MIN_HITS", "2"), "REQKO_SUGGEST_MIN_HITS"
+        )
+        suggest_interval_raw = env.get("REQKO_SUGGEST_INTERVAL_MINUTES", "15")
+        try:
+            suggest_interval_minutes = int(suggest_interval_raw)
+            if suggest_interval_minutes < 0:
+                raise ValueError
+        except ValueError as err:
+            raise ConfigError(
+                f"Invalid REQKO_SUGGEST_INTERVAL_MINUTES: {suggest_interval_raw}. "
+                "Must be a non-negative integer (0 disables the scheduler)."
+            ) from err
+        auto_score_raw = env.get("REQKO_SUGGEST_AUTO_APPROVE_SCORE", "").strip()
+        if auto_score_raw:
+            try:
+                suggest_auto_approve_score = int(auto_score_raw)
+                if suggest_auto_approve_score <= 0:
+                    raise ValueError
+            except ValueError as err:
+                raise ConfigError(
+                    f"Invalid REQKO_SUGGEST_AUTO_APPROVE_SCORE: {auto_score_raw}. "
+                    "Must be a positive integer."
+                ) from err
+        else:
+            suggest_auto_approve_score = None
+
+        # 16. Periodic blocklist URL refresh (0 disables)
+        refresh_raw = env.get("REQKO_BLOCKLIST_REFRESH_HOURS", "24")
+        try:
+            blocklist_refresh_hours = int(refresh_raw)
+            if blocklist_refresh_hours < 0:
+                raise ValueError
+        except ValueError as err:
+            raise ConfigError(
+                f"Invalid REQKO_BLOCKLIST_REFRESH_HOURS: {refresh_raw}. "
+                "Must be a non-negative integer (0 disables the refresh)."
+            ) from err
+
         return cls(
             admin_token=admin_token,
             dns_host=dns_host,
@@ -286,6 +338,11 @@ class Config:
             log_flush_interval=log_flush_interval,
             auth_failure_limit=auth_failure_limit,
             auth_failure_window=auth_failure_window,
+            suggest_window_hours=suggest_window_hours,
+            suggest_min_hits=suggest_min_hits,
+            suggest_interval_minutes=suggest_interval_minutes,
+            suggest_auto_approve_score=suggest_auto_approve_score,
+            blocklist_refresh_hours=blocklist_refresh_hours,
         )
 
 
