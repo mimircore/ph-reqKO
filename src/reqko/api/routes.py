@@ -191,6 +191,15 @@ async def handle_health(request: web.Request) -> web.Response:
     db_ok = await _db_reachable(state)
     upstream_ok = await _upstream_reachable(state)
     snapshot = state.engine.snapshot
+    # UDP self-probe watchdog (None when disabled, e.g. tests or non-loopback bind)
+    probe_body: dict[str, Any] | None = None
+    if state.dns_probe is not None:
+        lag = state.dns_probe.event_loop_lag_ms
+        probe_body = {
+            "last_probe_ok": state.dns_probe.last_probe_ok,
+            "consecutive_failures": state.dns_probe.consecutive_failures,
+            "event_loop_lag_ms": round(lag, 1) if lag is not None else None,
+        }
     body = {
         "status": "ok" if db_ok else "degraded",
         "uptime_seconds": round(time.monotonic() - state.started_at, 3),
@@ -205,6 +214,7 @@ async def handle_health(request: web.Request) -> web.Response:
             "depth": state.queue.qsize(),
             "dropped_events": state.drop_counter[0],
         },
+        "self_probe": probe_body,
     }
     return web.json_response(body, status=200 if db_ok else 503)
 

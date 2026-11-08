@@ -38,6 +38,11 @@ from reqko.filtering.engine import FilterEngine
 
 logger = logging.getLogger(__name__)
 
+# Fixed name used by the UDP self-probe watchdog (dns.server.DnsUdpWatchdog).
+# The pipeline answers it locally with REFUSED — no upstream query, no
+# query_log event — so the watchdog never pollutes statistics (dns/server.py).
+SELF_PROBE_NAME = "selfprobe.reqko.internal"
+
 
 @dataclass
 class QueryEvent:
@@ -266,6 +271,12 @@ async def process_query(
     question = request.questions[0]
     qname = question.name.strip(".").lower()
     qtype = question.qtype
+
+    # ── Step 3.5: UDP self-probe (watchdog liveness, never logged) ────────────
+    # Any reply at all proves the UDP path is alive; REFUSED is synthetic and
+    # the event is intentionally not dispatched (no query_log/stats noise).
+    if qname == SELF_PROBE_NAME:
+        return _respond(make_response(request, rcode=RCODE_REFUSED))
 
     # ── Step 4: ANY Check ─────────────────────────────────────────────────────
     if qtype == TYPE_ANY:
