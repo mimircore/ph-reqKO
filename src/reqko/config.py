@@ -49,7 +49,7 @@ class Config:
     upstream_dns: list[tuple[str, int]] = field(
         default_factory=lambda: [("9.9.9.9", 53), ("149.112.112.112", 53)]
     )
-    upstream_timeout: float = 2.0
+    upstream_timeout: float = 1.5
     block_mode: BlockMode = "NULL"
     allowed_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = field(
         default_factory=lambda: [
@@ -133,7 +133,7 @@ class Config:
 
         # 4. Upstream timeout
         try:
-            upstream_timeout = float(env.get("REQKO_UPSTREAM_TIMEOUT", "2.0"))
+            upstream_timeout = float(env.get("REQKO_UPSTREAM_TIMEOUT", "1.5"))
             if upstream_timeout <= 0:
                 raise ValueError
         except ValueError as err:

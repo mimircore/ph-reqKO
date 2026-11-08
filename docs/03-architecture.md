@@ -686,7 +686,7 @@ Content-Type: application/json
 | `REQKO_METRICS_PORT` | `int` | `9100` | Сетевой порт выделенного сервера метрик Prometheus |
 | `REQKO_API_KEY` | `str` | *(нет / обязателен)* | Секретный токен доступа к REST API (`X-API-Key`). Сервер не запускается без ключа |
 | `REQKO_UPSTREAM_DNS` | `str` | `9.9.9.9:53,149.112.112.112:53` | Список upstream DNS через запятую (основной и резервные) |
-| `REQKO_UPSTREAM_TIMEOUT` | `float` | `2.0` | Таймаут ожидания ответа от upstream в секундах |
+| `REQKO_UPSTREAM_TIMEOUT` | `float` | `1.5` | Таймаут ожидания ответа от upstream в секундах (апстримы опрашиваются гонкой) |
 | `REQKO_BLOCK_MODE` | `str` | `NULL` | Режим блокировки: `NULL` (`0.0.0.0`/`::`), `NXDOMAIN`, `NODATA` |
 | `REQKO_ALLOWED_NETWORKS` | `str` | `127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1/128,fe80::/10` | Разрешённые подсети клиентов (ACL). Подсети VPN добавляются сюда |
 | `REQKO_RATE_LIMIT_RPS` | `int` | `100` | Средний лимит запросов в секунду на один IP-клиент |

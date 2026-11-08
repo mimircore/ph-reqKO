@@ -65,9 +65,11 @@ class DNSCache:
         return len(self._cache)
 
     def get(self, qname: str, qtype: int) -> CacheEntry | None:
-        """Retrieves an entry from cache, evicting if expired.
+        """Retrieves an entry from cache; None when expired (entry is kept).
 
-        Updates LRU order and returns entry with positive remaining TTL.
+        Expired entries are deliberately NOT deleted on read: the serve-stale
+        path (RFC 8767, get_stale) may still need them when every upstream is
+        down. They are bounded by LRU size and overwritten on refresh.
         """
         key = (qname.strip(".").lower(), qtype)
         entry = self._cache.get(key)
@@ -76,12 +78,27 @@ class DNSCache:
 
         now = self._clock()
         if entry.remaining_ttl(now) <= 0:
-            # Expired
-            del self._cache[key]
+            # Expired — invisible to normal lookups, retained for serve-stale
             return None
 
         # Move to end (most recently used)
         self._cache.move_to_end(key, last=True)
+        return entry
+
+    def get_stale(self, qname: str, qtype: int) -> CacheEntry | None:
+        """Returns an EXPIRED entry without touching LRU order (RFC 8767).
+
+        None when the entry is missing or still fresh (fresh lookups belong
+        to get()); used only when upstreams fail and the client would
+        otherwise get SERVFAIL.
+        """
+        key = (qname.strip(".").lower(), qtype)
+        entry = self._cache.get(key)
+        if entry is None:
+            return None
+        now = self._clock()
+        if entry.remaining_ttl(now) > 0:
+            return None  # still fresh — get() owns that path
         return entry
 
     def set(
@@ -165,10 +182,17 @@ class DNSCache:
         self,
         request: DNSPacket,
         entry: CacheEntry,
+        *,
+        override_ttl: int | None = None,
     ) -> DNSPacket:
-        """Constructs a DNS response packet from cache, rewriting TTLs to remaining_ttl."""
+        """Constructs a DNS response packet from cache, rewriting TTLs.
+
+        override_ttl serves stale entries (RFC 8767): the expired entry's
+        TTLs would be <= 0, so the caller supplies a short fresh TTL (the
+        entry itself is unchanged).
+        """
         now = self._clock()
-        rem_ttl = entry.remaining_ttl(now)
+        rem_ttl = override_ttl if override_ttl is not None else entry.remaining_ttl(now)
 
         resp = make_response(request, rcode=entry.response_code, aa=False, ra=True)
 

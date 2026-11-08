@@ -12,7 +12,7 @@ import asyncio
 import logging
 import struct
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from reqko.dns.acl import ClientACL
 from reqko.dns.cache import DNSCache
@@ -33,7 +33,12 @@ from reqko.dns.protocol import (
     parse_wire,
 )
 from reqko.dns.ratelimit import RateLimiter
-from reqko.dns.upstream import UpstreamError, make_servfail, query_upstream
+from reqko.dns.upstream import (
+    UpstreamError,
+    UpstreamHealth,
+    make_servfail,
+    query_upstream,
+)
 from reqko.filtering.engine import FilterEngine
 
 logger = logging.getLogger(__name__)
@@ -42,6 +47,12 @@ logger = logging.getLogger(__name__)
 # The pipeline answers it locally with REFUSED — no upstream query, no
 # query_log event — so the watchdog never pollutes statistics (dns/server.py).
 SELF_PROBE_NAME = "selfprobe.reqko.internal"
+
+# Queries slower than this are logged with name/upstream/attempts (perf-latency)
+SLOW_QUERY_MS = 500.0
+# RFC 8767 serve-stale: TTL given to an expired entry served during a total
+# upstream outage (client re-asks soon; the cached entry itself is unchanged)
+SERVE_STALE_TTL = 30
 
 
 @dataclass
@@ -80,6 +91,8 @@ class PipelineConfig:
     block_ttl: int = 300
     log_queue: asyncio.Queue[QueryEvent] | None = None
     log_queue_drop_counter: list[int] | None = None  # [0] = mutable int
+    # Circuit breaker state shared across queries (single-loop concurrency)
+    upstream_health: UpstreamHealth = field(default_factory=UpstreamHealth)
 
 
 def _qtype_name(qtype: int) -> str:
@@ -313,16 +326,50 @@ async def process_query(
         _dispatch(_make_event(cached_resp, "CACHED"))
         return _respond(cached_resp)
 
-    # ── Step 8: Upstream Query ────────────────────────────────────────────────
+    # ── Step 8: Upstream Query (raced, breaker-guarded) ───────────────────────
     try:
-        upstream_resp, upstream_used = await query_upstream(
-            request, cfg.upstreams, timeout=cfg.upstream_timeout
+        upstream_result = await query_upstream(
+            request,
+            cfg.upstreams,
+            timeout=cfg.upstream_timeout,
+            health=cfg.upstream_health,
         )
     except UpstreamError as e:
-        logger.warning("All upstreams failed for %s: %s", qname, e)
+        # Serve-stale (RFC 8767): an expired cache entry beats SERVFAIL when
+        # every upstream is down. The stale answer gets a short TTL so the
+        # client re-asks soon, and is logged as CACHED (it came from cache).
+        stale = cfg.cache.get_stale(qname, qtype)
+        if stale is not None:
+            stale_resp = cfg.cache.build_response(request, stale, override_ttl=SERVE_STALE_TTL)
+            logger.warning(
+                "Upstream failure for %s (%d attempt(s)) — serving stale cache entry "
+                "(%d s TTL)",
+                qname,
+                e.attempts,
+                SERVE_STALE_TTL,
+            )
+            _dispatch(_make_event(stale_resp, "CACHED"))
+            return _respond(stale_resp)
+        logger.warning("All upstreams failed for %s (%d attempt(s)): %s", qname, e.attempts, e)
         servfail = make_servfail(request)
         _dispatch(_make_event(servfail, "ERROR_UPSTREAM"))
         return _respond(servfail)
+
+    upstream_resp = upstream_result.response
+    upstream_used = upstream_result.upstream
+
+    # Slow-query warning: the queue-draining tail that a mean hides; attempts
+    # shows how many upstreams were raced for this answer.
+    elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+    if elapsed_ms > SLOW_QUERY_MS:
+        logger.warning(
+            "Slow query %s (%s): %.0f ms via %s, attempts=%d",
+            qname,
+            _qtype_name(qtype),
+            elapsed_ms,
+            upstream_used,
+            upstream_result.attempts,
+        )
 
     # ── Step 9: CNAME Uncloaking (FR-09) ─────────────────────────────────────
     if not is_whitelisted:
