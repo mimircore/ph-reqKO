@@ -195,6 +195,32 @@ def test_is_protected_xiaomi_ad_host_exception() -> None:
     assert _is_protected("metrics.googleapis.com") is True
 
 
+def test_protected_service_bases_facebook_and_yandex_net() -> None:
+    """facebook.net / yandex.net service hosts (connect.facebook.net,
+    favicon.yandex.net) are never suggested, even with keyword labels."""
+    assert registrable_base("connect.facebook.net") == "facebook.net"
+    assert registrable_base("favicon.yandex.net") == "yandex.net"
+    assert _is_protected("connect.facebook.net") is True
+    assert _is_protected("favicon.yandex.net") is True
+    assert _is_protected("ads.connect.facebook.net") is True
+    assert _is_protected("ad2.favicon.yandex.net") is True
+
+    rows = _rows(
+        (1000.0, "192.168.1.5", "ads.connect.facebook.net", "FORWARDED"),
+        (1001.0, "192.168.1.5", "ads.connect.facebook.net", "FORWARDED"),
+        (1002.0, "192.168.1.5", "ad.favicon.yandex.net", "FORWARDED"),
+        (1003.0, "192.168.1.5", "ad.favicon.yandex.net", "FORWARDED"),
+        (1004.0, "192.168.1.5", "ads.suggestible.example", "FORWARDED"),
+        (1005.0, "192.168.1.5", "ads.suggestible.example", "FORWARDED"),
+    )
+    suggestions = analyze_rows(rows, blocked=frozenset(), allowlisted=frozenset(),
+                               rejected=frozenset())
+    domains = [s.domain for s in suggestions]
+    assert "ads.connect.facebook.net" not in domains
+    assert "ad.favicon.yandex.net" not in domains
+    assert "ads.suggestible.example" in domains
+
+
 def test_parse_ts_iso_roundtrip() -> None:
     assert _parse_ts(_iso(1700000000.0)) == 1700000000.0
 

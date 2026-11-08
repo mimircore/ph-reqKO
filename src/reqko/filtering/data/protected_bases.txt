@@ -23,6 +23,11 @@ amazonaws.com
 github.com
 miui.com
 xiaomi.com
+# Service/SDK bases whose subdomains break pages or logins when blocked by a
+# false-positive suggestion: connect.facebook.net (Facebook SDK),
+# favicon.yandex.net (Yandex favicon service).
+facebook.net
+yandex.net
 firebase*
 connectivitycheck.*
 msftconnecttest.com
