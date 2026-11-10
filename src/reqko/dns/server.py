@@ -306,8 +306,14 @@ class DnsUdpWatchdog:
                         await self._rebind()
                     except Exception:
                         logger.exception("UDP endpoint rebind failed")
-            delay = max(0.0, self._interval - (time.monotonic() - started))
-            await asyncio.sleep(delay)
+            # Interruptible sleep: a single asyncio.sleep(30) would delay
+            # graceful shutdown by up to a full interval — sleep in short
+            # steps like the schedulers do and re-check stop_event.
+            remaining = max(0.0, self._interval - (time.monotonic() - started))
+            while remaining > 0 and not stop_event.is_set():
+                step = min(1.0, remaining)
+                await asyncio.sleep(step)
+                remaining -= step
 
     async def _probe_once(self) -> bool:
         query_id = 0x524B  # "RK"
@@ -397,7 +403,8 @@ class DnsServerHandles:
 
     @property
     def udp_transport(self) -> asyncio.DatagramTransport:
-        assert self.udp.transport is not None
+        if self.udp.transport is None:
+            raise RuntimeError("UDP endpoint not started")
         return self.udp.transport
 
 
