@@ -1,0 +1,12 @@
+=== machine info ===
+OS: Windows-10-10.0.26200-SP0
+CPU: Intel64 Family 6 Model 165 Stepping 3, GenuineIntel
+cores: 12
+Python: 3.11.9 (tags/v3.11.9:de54cf5, Apr  2 2024, 10:12:12) [MSC v.1938 64 bit (AMD64)]
+
+=== upstream ===
+REQKO_UPSTREAM_DNS default: 9.9.9.9:53,149.112.112.112:53 (real Quad9, same loopback host)
+
+=== server ===
+blocklist: blocklist_big.txt = StevenBlack hosts, 85033 lines, 78215 rules loaded (see /health)
+PID: 17500 (python -m reqko, high ports DNS 15353 / API 18080 / metrics 19100)

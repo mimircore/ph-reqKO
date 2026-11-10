@@ -1,0 +1,2 @@
+=== RSS idle (78k rules loaded, no load) ===
+RSS idle = 4.68 MiB

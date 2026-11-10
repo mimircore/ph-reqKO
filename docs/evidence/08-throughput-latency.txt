@@ -1,0 +1,114 @@
+=== throughput/latency per class and concurrency (100 queries per scenario) ===
+
+cached     c=1   qps=  1394.7 p50=      0.3 p95=     0.52 p99=     0.84 max=      0.98 answered=100/100 amp=2.829
+forwarded  c=1   qps=   250.3 p50=     3.54 p95=      4.3 p99=     5.83 max=     11.46 answered=100/100 amp=2.898
+blocked    c=1   qps=  1731.9 p50=     0.23 p95=      0.4 p99=     0.53 max=      0.69 answered=100/100 amp=0.393
+cached     c=10  qps=  1940.2 p50=     2.16 p95=     4.66 p99=     5.56 max=      5.93 answered=100/100 amp=0.42
+forwarded  c=10  qps=  2187.2 p50=     1.82 p95=     3.47 p99=     4.07 max=      4.14 answered=100/100 amp=0.434
+blocked    c=10  qps=  2078.8 p50=     1.78 p95=     4.67 p99=      5.1 max=       6.7 answered=100/100 amp=0.394
+cached     c=50  qps=  2317.1 p50=     4.62 p95=    14.25 p99=    14.47 max=     14.51 answered=100/100 amp=0.369
+forwarded  c=50  qps=  2277.5 p50=     5.93 p95=     8.07 p99=    17.53 max=     17.57 answered=100/100 amp=0.461
+blocked    c=50  qps=  2256.1 p50=     4.59 p95=     6.54 p99=    15.85 max=      15.9 answered=100/100 amp=0.371
+JSON_BEGIN
+{
+  "cached@c1": {
+    "queries": 100,
+    "answered": 100,
+    "failures": 0,
+    "qps": 1394.7,
+    "p50": 0.3,
+    "p95": 0.52,
+    "p99": 0.84,
+    "max": 0.98,
+    "amplification_mean": 2.829
+  },
+  "forwarded@c1": {
+    "queries": 100,
+    "answered": 100,
+    "failures": 0,
+    "qps": 250.3,
+    "p50": 3.54,
+    "p95": 4.3,
+    "p99": 5.83,
+    "max": 11.46,
+    "amplification_mean": 2.898
+  },
+  "blocked@c1": {
+    "queries": 100,
+    "answered": 100,
+    "failures": 0,
+    "qps": 1731.9,
+    "p50": 0.23,
+    "p95": 0.4,
+    "p99": 0.53,
+    "max": 0.69,
+    "amplification_mean": 0.393
+  },
+  "cached@c10": {
+    "queries": 100,
+    "answered": 100,
+    "failures": 0,
+    "qps": 1940.2,
+    "p50": 2.16,
+    "p95": 4.66,
+    "p99": 5.56,
+    "max": 5.93,
+    "amplification_mean": 0.42
+  },
+  "forwarded@c10": {
+    "queries": 100,
+    "answered": 100,
+    "failures": 0,
+    "qps": 2187.2,
+    "p50": 1.82,
+    "p95": 3.47,
+    "p99": 4.07,
+    "max": 4.14,
+    "amplification_mean": 0.434
+  },
+  "blocked@c10": {
+    "queries": 100,
+    "answered": 100,
+    "failures": 0,
+    "qps": 2078.8,
+    "p50": 1.78,
+    "p95": 4.67,
+    "p99": 5.1,
+    "max": 6.7,
+    "amplification_mean": 0.394
+  },
+  "cached@c50": {
+    "queries": 100,
+    "answered": 100,
+    "failures": 0,
+    "qps": 2317.1,
+    "p50": 4.62,
+    "p95": 14.25,
+    "p99": 14.47,
+    "max": 14.51,
+    "amplification_mean": 0.369
+  },
+  "forwarded@c50": {
+    "queries": 100,
+    "answered": 100,
+    "failures": 0,
+    "qps": 2277.5,
+    "p50": 5.93,
+    "p95": 8.07,
+    "p99": 17.53,
+    "max": 17.57,
+    "amplification_mean": 0.461
+  },
+  "blocked@c50": {
+    "queries": 100,
+    "answered": 100,
+    "failures": 0,
+    "qps": 2256.1,
+    "p50": 4.59,
+    "p95": 6.54,
+    "p99": 15.85,
+    "max": 15.9,
+    "amplification_mean": 0.371
+  }
+}
+JSON_END

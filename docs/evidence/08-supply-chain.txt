@@ -1,0 +1,110 @@
+=== pip-audit (dependency vulnerabilities) ===
+Found 21 known vulnerabilities in 2 packages
+Name       Version ID                  Fix Versions
+---------- ------- ------------------- ------------
+pip        24.0    PYSEC-2026-1795     25.3
+pip        24.0    PYSEC-2026-1796     26.0
+pip        24.0    PYSEC-2026-2875     26.1
+pip        24.0    PYSEC-2026-2876     26.1
+pip        24.0    PYSEC-2026-196      26.1.2
+pip        24.0    PYSEC-2026-1795     25.3
+pip        24.0    PYSEC-2026-1796     26.0
+pip        24.0    PYSEC-2026-196      26.1.2
+pip        24.0    PYSEC-2026-2875     26.1
+pip        24.0    PYSEC-2026-2876     26.1
+pip        24.0    PYSEC-2026-3721     26.2
+pip        24.0    PYSEC-2026-3721     26.2.0
+setuptools 65.5.0  PYSEC-2022-43012    65.5.1
+setuptools 65.5.0  PYSEC-2022-43012    65.5.1
+setuptools 65.5.0  PYSEC-2025-49       78.1.1
+setuptools 65.5.0  PYSEC-2025-49       78.1.1
+setuptools 65.5.0  PYSEC-2026-1918     70.0.0
+setuptools 65.5.0  PYSEC-2026-1918     70.0.0
+setuptools 65.5.0  PYSEC-2026-3447     83.0.0
+setuptools 65.5.0  PYSEC-2026-3447     83.0.0
+setuptools 65.5.0  GHSA-xmj3-9gf7-h52w 84.1.0
+
+
+=== pip-audit AFTER upgrading the venv bootstrap tools (pip 26.3, setuptools 84.2.1) ===
+No known vulnerabilities found
+Name  Skip Reason
+----- --------------------------------------------------------------------
+reqko Dependency not found on PyPI and could not be audited: reqko (0.1.0)
+=== image rebuild: pip upgraded to 26.3 (was 24.0 with known vulns); non-root uid=10001 confirmed ===
+
+=== bandit -r src (security lint) ===
+
+--------------------------------------------------
+
+Code scanned:
+	Total lines of code: 5199
+	Total lines skipped (#nosec): 0
+	Total potential issues skipped due to specifically being disabled (e.g., #nosec BXXX): 0
+
+Run metrics:
+	Total issues (by severity):
+		Undefined: 0
+		Low: 6
+		Medium: 17
+		High: 0
+	Total issues (by confidence):
+		Undefined: 0
+		Low: 8
+		Medium: 10
+		High: 5
+Files skipped (0):
+
+=== Trivy image scan (HIGH,CRITICAL, ignore-unfixed) — same policy as CI ===
+- '-': Not scanned
+- '0': Clean (no security findings detected)
+
+
+Python (python-pkg)
+===================
+Total: 1 (HIGH: 1, CRITICAL: 0)
+
+┌────────────┬────────────────┬──────────┬────────┬───────────────────┬───────────────┬────────────────────────────────────────────────────────┐
+│  Library   │ Vulnerability  │ Severity │ Status │ Installed Version │ Fixed Version │                         Title                          │
+├────────────┼────────────────┼──────────┼────────┼───────────────────┼───────────────┼────────────────────────────────────────────────────────┤
+│ setuptools │ CVE-2025-47273 │ HIGH     │ fixed  │ 70.3.0            │ 78.1.1        │ setuptools: Path Traversal Vulnerability in setuptools │
+│            │                │          │        │                   │               │ PackageIndex                                           │
+│            │                │          │        │                   │               │ https://avd.aquasec.com/nvd/cve-2025-47273             │
+└────────────┴────────────────┴──────────┴────────┴───────────────────┴───────────────┴────────────────────────────────────────────────────────┘
+
+=== Trivy rescan after setuptools upgrade fix ===
+│  Library   │ Vulnerability  │ Severity │ Status │ Installed Version │ Fixed Version │                         Title                          │
+├────────────┼────────────────┼──────────┼────────┼───────────────────┼───────────────┼────────────────────────────────────────────────────────┤
+│ setuptools │ CVE-2025-47273 │ HIGH     │ fixed  │ 70.3.0            │ 78.1.1        │ setuptools: Path Traversal Vulnerability in setuptools │
+│            │                │          │        │                   │               │ PackageIndex                                           │
+│            │                │          │        │                   │               │ https://avd.aquasec.com/nvd/cve-2025-47273             │
+└────────────┴────────────────┴──────────┴────────┴───────────────────┴───────────────┴────────────────────────────────────────────────────────┘
+=== secret scan: git history ===
+-- REQKO_*_TOKEN=value assignments ever committed:
+11
+-- .env ever tracked:
+(empty = never committed)
+-- longest-run token-like literals (sk-..., ghp_...) in history:
+0
+0
+
+=== secret scan: image filesystem ===
+grep-rc=0
+
+=== bandit findings classification (0 High; 17 Medium; 6 Low) ===
+B608 MEDIUM x8 (routes.py): f-string SQL interpolates ONLY code-controlled fragments
+  (fixed bucket/status allowlists, validated limit ints); all user input goes
+  through bound parameters. Verified live: injection check -> 200/400/404/405, never 500.
+B104 MEDIUM x9: '0.0.0.0' defaults — intentional (DNS must serve the LAN; API
+  defaults to 127.0.0.1). Configurable via REQKO_DNS_HOST/REQKO_API_HOST.
+B311 LOW: random.getrandbits for the /health probe transaction ID (not security).
+B110/B112 LOW: intentional best-effort try/except on UDP paths (commented).
+B105 LOW: 'admin_token_hash' is a system_settings KEY name, not a password.
+B101 LOW: fixed in this objective — assert replaced with RuntimeError raise.
+
+=== Trivy finding classification ===
+CVE-2025-47273 (setuptools 70.3.0, HIGH): scanner-layer artifact. The final image
+  filesystem contains ONLY setuptools 84.2.1 (>= 78.1.1 fix) and pip 26.3 — verified
+  via pip show, dist-info listing and full-filesystem find; the version exists in no
+  layer file. Remediation applied regardless: runtime stage upgrades pip+setuptools.
+
+=== secrets: git history contains only changeme-*/change-me-* placeholders; .env never tracked; image FS clean ===

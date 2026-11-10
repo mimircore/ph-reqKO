@@ -1,0 +1,12 @@
+=== resilience: upstream dies -> serve-stale (RFC 8767) + circuit breaker ===
+single fake upstream (203.0.113.9, TTL 30); REQKO_CACHE_MIN_TTL=1; no blocklist
+1. healthy upstream, forwarded+cached: 1.4 ms
+3. waiting 31 s for the cache entry to expire...
+3. upstream KILLED; cache entry expired
+4. STALE serve with dead upstream: 4.6 ms  <-- RFC 8767 works
+5. forwarded query 0 with dead upstream: 5 ms (SERVFAIL)
+5. forwarded query 1 with dead upstream: 1 ms (SERVFAIL)
+5. forwarded query 2 with dead upstream: 1 ms (SERVFAIL)
+5. forwarded query 3 with dead upstream: 1 ms (SERVFAIL)
+6. health after outage: {"depth": 0, "dropped_events": 0} | status: ok
+RESILIENCE VERDICT: PASS (stale + breaker + no hang)
