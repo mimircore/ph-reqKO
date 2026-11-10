@@ -153,12 +153,22 @@ async def main() -> int:
     parser.add_argument("--per-scenario", type=int, default=100)
     parser.add_argument("--concurrencies", default="1,10,50")
     parser.add_argument("--timeout", type=float, default=10.0)
+    parser.add_argument("--prefix", default="o8",
+                        help="unique-name prefix: forwarded queries must never repeat")
+    parser.add_argument("--skip-kinds", default="",
+                        help="comma-separated kinds to skip (cached,forwarded,blocked)")
     args = parser.parse_args()
+    skip = {k.strip() for k in args.skip_kinds.split(",") if k.strip()}
 
     blocked_names = load_blocked_names(args.blocklist_file, args.per_scenario)
-    # Forwarded names: unique subdomains of a domain unlikely to be blocklisted
-    forwarded_names = [f"o8-{i}.bench.example" for i in range(args.per_scenario)]
     cached_name = "cached-bench.o8.example"
+    forwarded_counter = iter(range(1, 1_000_000_000))
+
+    def forwarded_names(count: int) -> list[str]:
+        # EVERY forwarded query must use a fresh name: repeats would be served
+        # from the cache and silently degrade the scenario into "cached".
+        return [f"{args.prefix}-f{next(forwarded_counter)}.bench.example"
+                for _ in range(count)]
 
     results: dict[str, object] = {}
     for concurrency in (int(c) for c in args.concurrencies.split(",")):
@@ -167,9 +177,11 @@ async def main() -> int:
 
         for kind, names in (
             ("cached", [cached_name] * args.per_scenario),
-            ("forwarded", forwarded_names),
+            ("forwarded", forwarded_names(args.per_scenario)),
             ("blocked", blocked_names),
         ):
+            if kind in skip:
+                continue
             stats = await bench_scenario(
                 args.host, args.port, names, concurrency, args.timeout
             )

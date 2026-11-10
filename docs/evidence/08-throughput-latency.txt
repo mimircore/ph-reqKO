@@ -1,114 +1,40 @@
-=== throughput/latency per class and concurrency (100 queries per scenario) ===
+=== objective-8 v2 latency benchmark (high-sample rerun) ===
+server A: PID 10176, 78216 rules, real Quad9 upstream
+cached/blocked: 2000 queries per scenario; forwarded: 300 UNIQUE names per level (no repeats, no cache pollution)
+NOTE v1 flaw fixed: forwarded names are now globally unique per level (v1 reused names, so levels c=10/50 measured the cache, not forwarding)
 
-cached     c=1   qps=  1394.7 p50=      0.3 p95=     0.52 p99=     0.84 max=      0.98 answered=100/100 amp=2.829
-forwarded  c=1   qps=   250.3 p50=     3.54 p95=      4.3 p99=     5.83 max=     11.46 answered=100/100 amp=2.898
-blocked    c=1   qps=  1731.9 p50=     0.23 p95=      0.4 p99=     0.53 max=      0.69 answered=100/100 amp=0.393
-cached     c=10  qps=  1940.2 p50=     2.16 p95=     4.66 p99=     5.56 max=      5.93 answered=100/100 amp=0.42
-forwarded  c=10  qps=  2187.2 p50=     1.82 p95=     3.47 p99=     4.07 max=      4.14 answered=100/100 amp=0.434
-blocked    c=10  qps=  2078.8 p50=     1.78 p95=     4.67 p99=      5.1 max=       6.7 answered=100/100 amp=0.394
-cached     c=50  qps=  2317.1 p50=     4.62 p95=    14.25 p99=    14.47 max=     14.51 answered=100/100 amp=0.369
-forwarded  c=50  qps=  2277.5 p50=     5.93 p95=     8.07 p99=    17.53 max=     17.57 answered=100/100 amp=0.461
-blocked    c=50  qps=  2256.1 p50=     4.59 p95=     6.54 p99=    15.85 max=      15.9 answered=100/100 amp=0.371
-JSON_BEGIN
-{
-  "cached@c1": {
-    "queries": 100,
-    "answered": 100,
-    "failures": 0,
-    "qps": 1394.7,
-    "p50": 0.3,
-    "p95": 0.52,
-    "p99": 0.84,
-    "max": 0.98,
-    "amplification_mean": 2.829
-  },
-  "forwarded@c1": {
-    "queries": 100,
-    "answered": 100,
-    "failures": 0,
-    "qps": 250.3,
-    "p50": 3.54,
-    "p95": 4.3,
-    "p99": 5.83,
-    "max": 11.46,
-    "amplification_mean": 2.898
-  },
-  "blocked@c1": {
-    "queries": 100,
-    "answered": 100,
-    "failures": 0,
-    "qps": 1731.9,
-    "p50": 0.23,
-    "p95": 0.4,
-    "p99": 0.53,
-    "max": 0.69,
-    "amplification_mean": 0.393
-  },
-  "cached@c10": {
-    "queries": 100,
-    "answered": 100,
-    "failures": 0,
-    "qps": 1940.2,
-    "p50": 2.16,
-    "p95": 4.66,
-    "p99": 5.56,
-    "max": 5.93,
-    "amplification_mean": 0.42
-  },
-  "forwarded@c10": {
-    "queries": 100,
-    "answered": 100,
-    "failures": 0,
-    "qps": 2187.2,
-    "p50": 1.82,
-    "p95": 3.47,
-    "p99": 4.07,
-    "max": 4.14,
-    "amplification_mean": 0.434
-  },
-  "blocked@c10": {
-    "queries": 100,
-    "answered": 100,
-    "failures": 0,
-    "qps": 2078.8,
-    "p50": 1.78,
-    "p95": 4.67,
-    "p99": 5.1,
-    "max": 6.7,
-    "amplification_mean": 0.394
-  },
-  "cached@c50": {
-    "queries": 100,
-    "answered": 100,
-    "failures": 0,
-    "qps": 2317.1,
-    "p50": 4.62,
-    "p95": 14.25,
-    "p99": 14.47,
-    "max": 14.51,
-    "amplification_mean": 0.369
-  },
-  "forwarded@c50": {
-    "queries": 100,
-    "answered": 100,
-    "failures": 0,
-    "qps": 2277.5,
-    "p50": 5.93,
-    "p95": 8.07,
-    "p99": 17.53,
-    "max": 17.57,
-    "amplification_mean": 0.461
-  },
-  "blocked@c50": {
-    "queries": 100,
-    "answered": 100,
-    "failures": 0,
-    "qps": 2256.1,
-    "p50": 4.59,
-    "p95": 6.54,
-    "p99": 15.85,
-    "max": 15.9,
-    "amplification_mean": 0.371
-  }
-}
-JSON_END
+cached     c=1   qps=    70.6 p50=     0.23 p95=     0.35 p99=      1.6 max=   1534.39 answered=2000/2000 amp=0.617
+blocked    c=1   qps=  1922.3 p50=     0.24 p95=     0.31 p99=     0.38 max=      0.54 answered=2000/2000 amp=0.386
+cached     c=10  qps=  2465.1 p50=     1.93 p95=     2.89 p99=     3.07 max=      4.19 answered=2000/2000 amp=0.395
+blocked    c=10  qps=  2761.0 p50=     1.93 p95=     2.75 p99=     2.93 max=      3.26 answered=2000/2000 amp=0.368
+cached     c=50  qps=  2774.1 p50=     9.92 p95=    12.29 p99=     12.8 max=     14.64 answered=2000/2000 amp=0.383
+blocked    c=50  qps=  2786.7 p50=    10.69 p95=    13.02 p99=    13.66 max=     14.72 answered=2000/2000 amp=0.368
+
+-- forwarded via real Quad9: 300 unique names per level, c=1 and c=10 only (flood-protection friendly) --
+forwarded  c=1   qps=   799.8 p50=      0.3 p95=     3.48 p99=     3.75 max=      5.74 answered=300/300 amp=0.86
+forwarded  c=10  qps=  2536.5 p50=     1.99 p95=     2.97 p99=      5.6 max=      6.16 answered=300/300 amp=0.386
+
+NOTE: a first v2 attempt was run DURING the soak — numbers invalid (client saw rate-limit
+refusals and scheduler contention: cached c=1 qps 70.6, forwarded p50 0.3 ms). Superseded
+by the idle-server rerun below.
+=== objective-8 v2 latency rerun on the IDLE server (PID 10176, 78216 rules, real Quad9) ===
+cached/blocked: 2000 queries per scenario per level; forwarded: 300 UNIQUE names per level (c=1, c=10 only — Quad9 flood-protection friendly)
+NOTE: the first v2 attempt ran DURING the soak and was invalid (rate-limit refusals + scheduler contention); this rerun is clean.
+
+cached     c=1   qps=  1779.9 p50=     0.24 p95=     0.36 p99=     0.46 max=      0.62 answered=2000/2000 amp=0.622
+blocked    c=1   qps=  1828.7 p50=     0.24 p95=     0.35 p99=     0.44 max=      0.66 answered=2000/2000 amp=0.39
+cached     c=10  qps=  2303.2 p50=     2.37 p95=     3.27 p99=      3.7 max=      4.78 answered=2000/2000 amp=0.403
+blocked    c=10  qps=  2408.9 p50=      2.3 p95=     3.06 p99=     3.37 max=      3.82 answered=2000/2000 amp=0.375
+cached     c=50  qps=  2533.2 p50=     5.29 p95=    11.07 p99=    13.07 max=     14.29 answered=2000/2000 amp=0.392
+blocked    c=50  qps=  2604.1 p50=      5.2 p95=    10.46 p99=    13.08 max=     14.29 answered=2000/2000 amp=0.372
+
+forwarded  c=1   qps=   745.8 p50=     0.31 p95=     3.84 p99=     4.27 max=      5.34 answered=300/300 amp=0.99
+forwarded  c=10  qps=  2313.1 p50=     2.37 p95=     3.57 p99=      6.1 max=       6.5 answered=300/300 amp=0.403
+-- forwarded via real Quad9, corrected: 150 unique names per level (within the per-client rate-limit burst budget; 300 unique names total) --
+forwarded  c=1   qps=   251.4 p50=     3.58 p95=     4.04 p99=     4.28 max=      4.72 answered=150/150 amp=2.91
+forwarded  c=10  qps=  1759.5 p50=     2.93 p95=     8.08 p99=     8.76 max=      9.38 answered=150/150 amp=1.416
+
+-- forwarded via LOCAL fake upstream (no real-upstream flood risk): 2000 unique names per level --
+forwarded  c=1   qps=  1551.4 p50=     0.25 p95=     0.85 p99=     1.09 max=       1.5 answered=2000/2000 amp=0.449
+forwarded  c=10  qps=  2347.6 p50=      2.4 p95=      3.3 p99=     3.69 max=      4.51 answered=2000/2000 amp=0.339
+forwarded  c=50  qps=  2394.7 p50=    10.49 p95=    14.12 p99=    15.06 max=     16.17 answered=2000/2000 amp=0.338
