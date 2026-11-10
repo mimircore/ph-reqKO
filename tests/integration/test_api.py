@@ -33,7 +33,9 @@ from reqko.dns.protocol import (
     parse_wire,
 )
 from reqko.dns.ratelimit import RateLimiter
-from reqko.filtering.engine import FilterEngine
+from reqko.dns.server import DnsProbeStatus, LoopLagMonitor
+from reqko.dns.upstream import UpstreamResult
+from reqko.filtering.engine import FilterEngine, FilterSnapshot
 from reqko.filtering.rules import RuleManager
 from reqko.storage.migrations import init_database
 
@@ -537,7 +539,7 @@ async def test_allowlist_change_takes_effect_on_next_dns_query() -> None:
         questions=[DNSQuestion(name="dual.test", qtype=TYPE_A)],
         answers=[DNSRecord("dual.test", TYPE_A, CLASS_IN, 300, "6.6.6.6")],
     )
-    mock = AsyncMock(return_value=(fake_resp, "127.0.0.1:53"))
+    mock = AsyncMock(return_value=UpstreamResult(response=fake_resp, upstream="127.0.0.1:53", attempts=1))
 
     try:
         # 1. Block via API
@@ -690,5 +692,694 @@ async def test_ready_is_public_and_reflects_rules() -> None:
         assert resp.status == 200
         body = await resp.json()
         assert body["status"] == "ready" and body["rules_loaded"] == 1
+    finally:
+        await client.close()
+
+
+# ── browser extension (client scope) ───────────────────────────────────────────
+
+CLIENT_TOKEN = "client-token-789"
+CLIENT_AUTH = {"Authorization": f"Bearer {CLIENT_TOKEN}"}
+
+
+async def _client_app(conn: sqlite3.Connection) -> tuple[ApiState, TestClient[web.Request, web.Application]]:
+    """Builds a state with a client token and returns (state, client)."""
+    state = _state(conn)
+    state.tokens = TokenStore(
+        hash_token(ADMIN_TOKEN), None, hash_token(CLIENT_TOKEN)
+    )
+    client = await _start(state)
+    return state, client
+
+
+async def test_client_scope_can_fetch_rules_but_nothing_else() -> None:
+    conn = init_database(":memory:")
+    _, client = await _client_app(conn)
+    try:
+        # The two allowed endpoints
+        resp = await client.get("/api/v1/extension/rules", headers=CLIENT_AUTH)
+        assert resp.status == 200
+        resp = await client.post(
+            "/api/v1/extension/report",
+            json={"events": [{"domain": "x.test", "count": 1, "ts": 1}]},
+            headers=CLIENT_AUTH,
+        )
+        # ts=1 is far older than 24h -> 400 proves the endpoint is reachable
+        # (validation happens after auth); the 403 test is below.
+        assert resp.status == 400
+
+        # Everything else must be 403 for the client scope
+        for method, path in (
+            ("GET", "/api/v1/stats/summary"),
+            ("GET", "/api/v1/queries"),
+            ("GET", "/api/v1/allowlist"),
+            ("GET", "/api/v1/stats/top-domains"),
+            ("POST", "/api/v1/allowlist"),
+            ("POST", "/api/v1/blocklist/custom"),
+            ("POST", "/api/v1/blocklists/update"),
+            ("DELETE", "/api/v1/allowlist/x.test"),
+            ("GET", "/health/other"),  # not the real /health
+        ):
+            resp = await client.request(
+                method, path, headers=CLIENT_AUTH,
+                json={"domain": "x.test"} if method == "POST" else None,
+            )
+            assert resp.status == 403, f"{method} {path}: {resp.status}"
+    finally:
+        await client.close()
+
+
+async def test_read_and_admin_tokens_keep_working() -> None:
+    conn = init_database(":memory:")
+    state = _state(conn, read_token=READ_TOKEN)
+    client = await _start(state)
+    try:
+        resp = await client.get(
+            "/api/v1/stats/summary", headers={"Authorization": f"Bearer {READ_TOKEN}"}
+        )
+        assert resp.status == 200
+        resp = await client.get("/api/v1/extension/rules", headers=AUTH)
+        assert resp.status == 200
+        resp = await client.post(
+            "/api/v1/extension/report",
+            json={"events": [{"domain": "x.test", "count": 1,
+                              "ts": __import__("time").time()}]},
+            headers=AUTH,
+        )
+        assert resp.status == 202
+    finally:
+        await client.close()
+
+
+async def test_extension_rules_content_allowlist_priority_and_deterministic_order() -> None:
+    conn = init_database(":memory:")
+    state, client = await _client_app(conn)
+    # base blocklist: b.test, a.test, wildcard w.test; allowlist: keep.test, a.test
+    state.engine.update_snapshot(
+        FilterSnapshot(
+            exact_set=frozenset({"a.test", "b.test"}),
+            wildcard_set=frozenset({"w.test"}),
+            allow_exact_set=frozenset({"keep.test", "a.test"}),
+            allow_wildcard_set=frozenset(),
+        )
+    )
+    client = await _start(state)
+    try:
+        resp = await client.get("/api/v1/extension/rules", headers=CLIENT_AUTH)
+        assert resp.status == 200
+        body = await resp.json()
+        # allowlisted a.test is excluded; deterministic sorted order
+        assert body["domains"] == ["b.test", "w.test"]
+        assert body["count"] == 2
+        assert body["truncated"] is False
+        assert body["skipped"] == 0
+        assert isinstance(body["version"], int)
+        assert "ETag" in resp.headers
+    finally:
+        await client.close()
+
+
+async def test_extension_rules_etag_304_and_limit_truncation() -> None:
+    conn = init_database(":memory:")
+    state, client = await _client_app(conn)
+    state.engine.update_snapshot(
+        FilterSnapshot(
+            exact_set=frozenset({f"d{i}.test" for i in range(5)}),
+            wildcard_set=frozenset(),
+            allow_exact_set=frozenset(),
+            allow_wildcard_set=frozenset(),
+        )
+    )
+    client = await _start(state)
+    try:
+        resp1 = await client.get("/api/v1/extension/rules?limit=3", headers=CLIENT_AUTH)
+        body1 = await resp1.json()
+        assert body1["count"] == 5
+        assert body1["truncated"] is True
+        assert len(body1["domains"]) == 3
+        # deterministic truncation: sorted order
+        assert body1["domains"] == sorted(body1["domains"])
+
+        etag = resp1.headers["ETag"]
+        resp2 = await client.get(
+            "/api/v1/extension/rules?limit=3",
+            headers={**CLIENT_AUTH, "If-None-Match": etag},
+        )
+        assert resp2.status == 304
+        assert await resp2.read() == b""
+
+        # changed content -> new ETag, 200
+        state.engine.update_snapshot(
+            FilterSnapshot(
+                exact_set=frozenset({f"d{i}.test" for i in range(6)}),
+                wildcard_set=frozenset(),
+                allow_exact_set=frozenset(),
+                allow_wildcard_set=frozenset(),
+            )
+        )
+        resp3 = await client.get(
+            "/api/v1/extension/rules?limit=3",
+            headers={**CLIENT_AUTH, "If-None-Match": etag},
+        )
+        assert resp3.status == 200
+        assert resp3.headers["ETag"] != etag
+
+        # limit validation
+        for query in ("limit=0", "limit=100001", "limit=abc"):
+            resp = await client.get(f"/api/v1/extension/rules?{query}", headers=CLIENT_AUTH)
+            assert resp.status == 400, query
+    finally:
+        await client.close()
+
+
+async def test_extension_rules_skips_unrepresentable_entries() -> None:
+    conn = init_database(":memory:")
+    state, client = await _client_app(conn)
+    # A rule that is not a valid plain domain (simulates future rule kinds):
+    # inserted directly, bypassing add_rule validation
+    def _insert() -> None:
+        conn.execute(
+            "INSERT INTO custom_rules (rule_type, syntax_type, domain, enabled) "
+            "VALUES ('blacklist', 'exact', 'not a domain!', 1)"
+        )
+        conn.commit()
+
+    import asyncio as _asyncio
+
+    await _asyncio.get_running_loop().run_in_executor(None, _insert)
+    # Reload the engine from the DB so the invalid domain is in the snapshot
+    def _reload() -> None:
+        from reqko.filtering.rules import RuleManager as _RM
+        fresh = _RM(state.engine, conn)
+        fresh.load_persisted()
+
+    await _asyncio.get_running_loop().run_in_executor(None, _reload)
+
+    client = await _start(state)
+    try:
+        resp = await client.get("/api/v1/extension/rules", headers=CLIENT_AUTH)
+        body = await resp.json()
+        assert body["skipped"] >= 1
+        assert "not a domain!" not in body["domains"]
+    finally:
+        await client.close()
+
+
+async def test_extension_report_stores_browser_events() -> None:
+    conn = init_database(":memory:")
+    state, client = await _client_app(conn)
+    # Run the REAL query-log writer against the same DB so the queue is drained
+    from reqko.storage.writer import QueryLogWriter as _Writer
+    writer = _Writer(conn, batch_size=1, flush_interval=60.0)
+    writer_task = asyncio.create_task(writer.run(state.queue))
+    try:
+        now = __import__("time").time()
+        resp = await client.post(
+            "/api/v1/extension/report",
+            json={"events": [
+                {"domain": "ads.test", "count": 3, "ts": now},
+                {"domain": "trackers.test", "count": 1, "ts": now},
+            ]},
+            headers=CLIENT_AUTH,
+        )
+        assert resp.status == 202
+        body = await resp.json()
+        assert body["queued"] == 4
+
+        # rows are stored through the writer path (batch flush) - wait for it
+        import asyncio as _asyncio
+        await _asyncio.sleep(0.3)
+
+        def _rows() -> list[sqlite3.Row]:
+            return conn.execute(
+                "SELECT question_name, status, source, occurrences FROM query_log "
+                "WHERE source = 'browser' ORDER BY question_name"
+            ).fetchall()
+
+        await writer.stop()
+        await writer_task
+        rows = await _asyncio.get_running_loop().run_in_executor(None, _rows)
+        assert len(rows) == 2
+        assert rows[0]["question_name"] == "ads.test"
+        assert rows[0]["status"] == "BLOCKED"
+        assert rows[0]["source"] == "browser"
+        assert rows[0]["occurrences"] == 3
+
+        # summary exposes browser_blocked
+        resp = await client.get("/api/v1/stats/summary", headers=AUTH)
+        summary = await resp.json()
+        assert summary["browser_blocked"] == 4
+    finally:
+        await client.close()
+
+
+async def test_extension_report_validation_errors() -> None:
+    conn = init_database(":memory:")
+    _, client = await _client_app(conn)
+    now = __import__("time").time()
+    try:
+        bad_bodies = [
+            {"events": "not-a-list"},
+            {"events": []},
+            {"events": [{"domain": "x.test"}]},                       # no count/ts
+            {"events": [{"domain": 5, "count": 1, "ts": now}]},       # domain not str
+            {"events": [{"domain": "bad domain!", "count": 1, "ts": now}]},
+            {"events": [{"domain": "x.test", "count": 0, "ts": now}]},
+            {"events": [{"domain": "x.test", "count": 10001, "ts": now}]},
+            {"events": [{"domain": "x.test", "count": True, "ts": now}]},
+            {"events": [{"domain": "x.test", "count": 1, "ts": "now"}]},
+            {"events": [{"domain": "x.test", "count": 1, "ts": now - 90000}]},  # >24h
+            {"events": [{"domain": "x.test", "count": 1, "ts": now + 500}]},    # future
+            {"events": [{"domain": f"e{i}.test", "count": 40, "ts": now}
+                        for i in range(501)]},                        # >500 events
+        ]
+        for body in bad_bodies:
+            resp = await client.post(
+                "/api/v1/extension/report", json=body, headers=CLIENT_AUTH
+            )
+            assert resp.status == 400, body
+    finally:
+        await client.close()
+
+
+async def test_extension_report_rate_limited() -> None:
+    conn = init_database(":memory:")
+    state = _state(conn)
+    state.tokens = TokenStore(
+        hash_token(ADMIN_TOKEN), None, hash_token(CLIENT_TOKEN)
+    )
+    # small limiter for the test: burst 3
+    from reqko.dns.ratelimit import RateLimiter as _RL
+    state.report_limiter = _RL(rate_rps=0.1, burst=3.0)
+    client = await _start(state)
+    now = __import__("time").time()
+    try:
+        statuses = []
+        for _ in range(5):
+            resp = await client.post(
+                "/api/v1/extension/report",
+                json={"events": [{"domain": "x.test", "count": 1, "ts": now}]},
+                headers=CLIENT_AUTH,
+            )
+            statuses.append(resp.status)
+        assert statuses == [202, 202, 202, 429, 429]
+    finally:
+        await client.close()
+
+
+async def test_extension_cosmetic_endpoint_and_client_scope() -> None:
+    conn = init_database(":memory:")
+    _, client = await _client_app(conn)
+    try:
+        resp = await client.get("/api/v1/extension/cosmetic", headers=CLIENT_AUTH)
+        assert resp.status == 200
+        assert resp.headers["ETag"]
+        body = await resp.json()
+        assert body["count"] == len(body["selectors"])
+        assert body["count"] > 0
+        assert ".adsbygoogle" in body["selectors"]
+        assert "ins.adsbygoogle" in body["selectors"]
+        # every selector is conservative: no injection vectors
+        for selector in body["selectors"]:
+            lowered = selector.lower()
+            assert "{" not in selector and "}" not in selector
+            assert "url(" not in lowered and "@import" not in lowered
+            assert "expression" not in lowered and "javascript:" not in lowered
+            assert "<" not in selector and ">" not in selector
+
+        # 304 on unchanged content
+        etag = resp.headers["ETag"]
+        resp2 = await client.get(
+            "/api/v1/extension/cosmetic", headers={**CLIENT_AUTH, "If-None-Match": etag}
+        )
+        assert resp2.status == 304
+
+        # read/admin scopes also allowed (GET)
+        resp = await client.get("/api/v1/extension/cosmetic", headers=AUTH)
+        assert resp.status == 200
+    finally:
+        await client.close()
+
+
+async def test_cosmetic_selector_validation_rejects_injection() -> None:
+    from reqko.api.cosmetic import validate_selector
+
+    # rejection cases: injection vectors and junk
+    for bad in (
+        ".x { display: none }",
+        ".x { background: url(http://evil) }",
+        "a[href^='javascript:']",
+        ".x { behavior: url(#default#time2) }",
+        ".x { -moz-binding: url(x.xml) }",
+        "expression(alert(1))",
+        ".x < script",
+        "x" * 300,
+        "",
+        "# a comment",
+    ):
+        assert validate_selector(bad) is None, bad
+
+    # acceptance cases: plain, conservative selectors
+    for good in (
+        ".adsbygoogle",
+        'iframe[src*="doubleclick"]',
+        '[id^="div-gpt-ad"]',
+        ".advert-sidebar",
+    ):
+        assert validate_selector(good) == good, good
+
+
+async def test_extension_rules_limit_raised_for_packed_lists() -> None:
+    conn = init_database(":memory:")
+    state, client = await _client_app(conn)
+    state.engine.update_snapshot(
+        FilterSnapshot(
+            exact_set=frozenset({f"d{i}.test" for i in range(40000)}),
+            wildcard_set=frozenset(),
+            allow_exact_set=frozenset(),
+            allow_wildcard_set=frozenset(),
+        )
+    )
+    try:
+        # 40000 domains: above the old 30000 cap, within the new one
+        resp = await client.get("/api/v1/extension/rules", headers=CLIENT_AUTH)
+        body = await resp.json()
+        assert body["count"] == 40000
+        assert body["truncated"] is False
+
+        # ?limit=30000 still truncates deterministically
+        resp = await client.get(
+            "/api/v1/extension/rules?limit=30000", headers=CLIENT_AUTH
+        )
+        body = await resp.json()
+        assert body["count"] == 40000
+        assert body["truncated"] is True
+        assert len(body["domains"]) == 30000
+        assert body["domains"] == sorted(body["domains"])
+    finally:
+        await client.close()
+
+
+# ── domain suggestions (adaptive discovery) ────────────────────────────────────
+
+
+def _seed_suggestion(
+    conn: sqlite3.Connection, domain: str, base: str, score: int = 5
+) -> None:
+    from reqko.filtering.suggester import Suggestion, save_suggestions
+
+    save_suggestions(
+        conn,
+        [
+            Suggestion(
+                domain=domain, base=base, score=score, reasons=["keyword:ads"],
+                hits=3, first_seen=1000.0, last_seen=2000.0,
+            )
+        ],
+    )
+
+
+async def test_approve_adds_rule_that_changes_next_dns_answer() -> None:
+    """Approving a suggestion installs a real blocklist rule: the very next
+    DNS query for the domain is blocked instead of forwarded."""
+    conn = init_database(":memory:")
+    state = _state(conn)
+    client = await _start(state)
+
+    pipeline_cfg = PipelineConfig(
+        acl=ClientACL([ipaddress.ip_network("127.0.0.0/8")]),
+        rate_limiter=RateLimiter(rate_rps=10000.0, burst=20000.0),
+        filter_engine=state.engine,
+        cache=DNSCache(),
+        upstreams=[("127.0.0.1", 1)],
+        upstream_timeout=0.1,
+        block_mode="NULL",
+    )
+
+    def _dns_query(name: str, qid: int) -> bytes:
+        return DNSPacket(
+            header=DNSHeader(id=qid, qr=0, rd=1),
+            questions=[DNSQuestion(name=name, qtype=TYPE_A)],
+        ).to_wire()
+
+    fake_resp = DNSPacket(
+        header=DNSHeader(id=1, qr=1, ra=1),
+        questions=[DNSQuestion(name="ads-test.example", qtype=TYPE_A)],
+        answers=[DNSRecord("ads-test.example", TYPE_A, CLASS_IN, 300, "9.9.9.9")],
+    )
+    mock = AsyncMock(return_value=UpstreamResult(response=fake_resp, upstream="127.0.0.1:53", attempts=1))
+
+    try:
+        _seed_suggestion(conn, "ads-test.example", "ads-test.example")
+
+        with patch("reqko.dns.pipeline.query_upstream", new=mock):
+            before = parse_wire(
+                await process_query(
+                    _dns_query("ads-test.example", 1), "127.0.0.1", pipeline_cfg
+                )
+            )
+        assert before.answers[0].rdata == "9.9.9.9"  # not blocked yet
+
+        resp = await client.post(
+            "/api/v1/suggestions/ads-test.example/approve", headers=AUTH
+        )
+        assert resp.status == 200
+        assert await resp.json() == {
+            "status": "approved",
+            "domain": "ads-test.example",
+        }
+
+        after = parse_wire(
+            await process_query(
+                _dns_query("ads-test.example", 2), "127.0.0.1", pipeline_cfg
+            )
+        )
+        assert after.answers[0].rdata == "0.0.0.0"  # blocked by the approved rule
+
+        # Listed as approved; a manual decision is never marked auto
+        resp = await client.get("/api/v1/suggestions?status=approved", headers=AUTH)
+        assert resp.status == 200
+        rows = (await resp.json())["suggestions"]
+        assert any(
+            s["domain"] == "ads-test.example" and s["auto"] is False for s in rows
+        )
+    finally:
+        await client.close()
+
+
+async def test_suggestion_decide_validation() -> None:
+    conn = init_database(":memory:")
+    state = _state(conn)
+    client = await _start(state)
+    try:
+        # Unknown decision action -> 404
+        resp = await client.post("/api/v1/suggestions/x.example/frob", headers=AUTH)
+        assert resp.status == 404
+
+        # No suggestion for the domain -> 404 and NO blocklist rule installed
+        resp = await client.post(
+            "/api/v1/suggestions/ghost.example/approve", headers=AUTH
+        )
+        assert resp.status == 404
+        assert state.engine.match("ghost.example").is_blocked is False
+
+        # Invalid list status -> 400
+        resp = await client.get("/api/v1/suggestions?status=bogus", headers=AUTH)
+        assert resp.status == 400
+    finally:
+        await client.close()
+
+
+async def test_analyze_writes_suggestions_and_reject_is_remembered() -> None:
+    conn = init_database(":memory:")
+    state = _state(conn)
+    client = await _start(state)
+    try:
+        # Two FORWARDED queries per domain inside the 24h window (min_hits=2)
+        for name in ("fresh-ads.example", "reject-me.example"):
+            for _ in range(2):
+                conn.execute(
+                    "INSERT INTO query_log (client_ip, question_name, "
+                    "question_type, status, latency_ms, response_code) "
+                    "VALUES ('10.0.0.1', ?, 'A', 'FORWARDED', 1.0, 0)",
+                    (name,),
+                )
+        conn.commit()
+
+        _seed_suggestion(conn, "reject-me.example", "reject-me.example")
+        resp = await client.post(
+            "/api/v1/suggestions/reject-me.example/reject", headers=AUTH
+        )
+        assert resp.status == 200
+        assert (await resp.json())["status"] == "rejected"
+
+        resp = await client.post("/api/v1/suggestions/analyze", headers=AUTH)
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["status"] == "analyzed"
+        # fresh-ads.example is new; reject-me.example is remembered as rejected
+        assert body["suggestions_written"] == 1
+
+        resp = await client.get("/api/v1/suggestions?status=pending", headers=AUTH)
+        assert resp.status == 200
+        domains = [s["domain"] for s in (await resp.json())["suggestions"]]
+        assert "fresh-ads.example" in domains
+        assert "reject-me.example" not in domains
+    finally:
+        await client.close()
+
+
+async def test_suggestion_scopes_read_can_list_admin_can_decide() -> None:
+    conn = init_database(":memory:")
+    state = _state(conn, read_token=READ_TOKEN)
+    _seed_suggestion(conn, "scoped.example", "scoped.example")
+    client = await _start(state)
+    try:
+        # read scope: can list
+        resp = await client.get(
+            "/api/v1/suggestions?status=pending",
+            headers={"Authorization": f"Bearer {READ_TOKEN}"},
+        )
+        assert resp.status == 200
+        assert len((await resp.json())["suggestions"]) == 1
+
+        # read scope: cannot analyze/approve/reject
+        for method, path in (
+            ("POST", "/api/v1/suggestions/analyze"),
+            ("POST", "/api/v1/suggestions/scoped.example/approve"),
+            ("POST", "/api/v1/suggestions/scoped.example/reject"),
+        ):
+            resp = await client.request(
+                method, path, headers={"Authorization": f"Bearer {READ_TOKEN}"}
+            )
+            assert resp.status == 403, f"{method} {path}: {resp.status}"
+
+        # admin: analyze + decide work
+        resp = await client.post("/api/v1/suggestions/analyze", headers=AUTH)
+        assert resp.status == 200
+        resp = await client.post(
+            "/api/v1/suggestions/scoped.example/approve", headers=AUTH
+        )
+        assert resp.status == 200
+    finally:
+        await client.close()
+
+
+def test_suggestions_auto_mode_off_by_default() -> None:
+    """REQKO_SUGGEST_AUTO_APPROVE_SCORE unset -> manual review (None)."""
+    cfg = Config.from_env({"REQKO_ADMIN_TOKEN": "x"})
+    assert cfg.suggest_auto_approve_score is None
+    assert cfg.suggest_window_hours == 24
+    assert cfg.suggest_min_hits == 2
+    assert cfg.suggest_interval_minutes == 15
+
+    cfg = Config.from_env({"REQKO_SUGGEST_AUTO_APPROVE_SCORE": "5"})
+    assert cfg.suggest_auto_approve_score == 5
+
+
+# ── /health: UDP self-probe watchdog (Windows 10054 hardening) ─────────────────
+
+
+async def test_health_self_probe_null_when_disabled() -> None:
+    """Without the watchdog (default in tests) self_probe is null."""
+    conn = init_database(":memory:")
+    state = _state(conn)
+    assert state.dns_probe is None
+    client = await _start(state)
+    try:
+        resp = await client.get("/health")
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["self_probe"] is None
+    finally:
+        await client.close()
+
+
+async def test_health_exposes_self_probe_status_and_lag() -> None:
+    conn = init_database(":memory:")
+    state = _state(conn)
+    state.dns_probe = DnsProbeStatus(
+        last_probe_ok="2026-11-08 20:00:00",
+        consecutive_failures=0,
+    )
+    state.loop_lag = LoopLagMonitor()
+    client = await _start(state)
+    try:
+        resp = await client.get("/health")
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["self_probe"] == {
+            "last_probe_ok": "2026-11-08 20:00:00",
+            "consecutive_failures": 0,
+        }
+        # No samples yet (monitor task not started in tests)
+        assert body["event_loop_lag_ms"] is None
+
+        # Failure counters are reported verbatim for alerting
+        state.dns_probe.consecutive_failures = 2
+        resp = await client.get("/health")
+        body = await resp.json()
+        assert body["self_probe"]["consecutive_failures"] == 2
+    finally:
+        await client.close()
+
+
+async def test_health_reports_loop_lag_max_over_window() -> None:
+    """event_loop_lag_ms is the max sleep-drift sample recorded so far."""
+    conn = init_database(":memory:")
+    state = _state(conn)
+    monitor = LoopLagMonitor()
+    state.loop_lag = monitor
+    client = await _start(state)
+    try:
+        # Feed samples directly through the public API shape: simulate by
+        # recording drift via a short run of the monitor task.
+        stop = asyncio.Event()
+        task = asyncio.create_task(monitor.run(stop))
+        await asyncio.sleep(0.35)  # ~3 samples at 0.1 s interval
+        stop.set()
+        await asyncio.wait_for(task, timeout=2.0)
+
+        resp = await client.get("/health")
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["event_loop_lag_ms"] is not None
+        assert body["event_loop_lag_ms"] >= 0.0
+    finally:
+        await client.close()
+
+
+async def test_stats_summary_latency_percentiles_by_group() -> None:
+    """latency_ms groups upstream (FORWARDED+ERROR_UPSTREAM), cached and
+    blocked separately; p50/p95/p99/max come from raw per-query latencies."""
+    conn = init_database(":memory:")
+    state = _state(conn)
+    _insert_event(conn, "2026-11-08 10:00:00", "127.0.0.1", "a.example", "FORWARDED", 10.0)
+    _insert_event(conn, "2026-11-08 10:00:01", "127.0.0.1", "b.example", "FORWARDED", 20.0)
+    _insert_event(conn, "2026-11-08 10:00:02", "127.0.0.1", "c.example", "FORWARDED", 30.0)
+    _insert_event(conn, "2026-11-08 10:00:03", "127.0.0.1", "d.example", "CACHED", 0.1)
+    _insert_event(conn, "2026-11-08 10:00:04", "127.0.0.1", "e.example", "ERROR_UPSTREAM", 2000.0)
+    _insert_event(conn, "2026-11-08 10:00:05", "127.0.0.1", "f.example", "BLOCKED_BLACKLIST", 0.2)
+    client = await _start(state)
+    try:
+        resp = await client.get("/api/v1/stats/summary", headers=AUTH)
+        assert resp.status == 200
+        body = await resp.json()
+
+        # upstream group = 3 FORWARDED + the ERROR_UPSTREAM outlier: exactly
+        # the shape that destroys the mean (2 s outlier in a 10-30 ms crowd)
+        upstream = body["latency_ms"]["upstream"]
+        assert upstream["samples"] == 4
+        assert upstream["p50"] == 25.0
+        assert upstream["p95"] == 1704.5  # 30 + (2000-30)*0.85
+        assert upstream["max"] == 2000.0
+
+        cached = body["latency_ms"]["cached"]
+        assert cached == {"p50": 0.1, "p95": 0.1, "p99": 0.1, "max": 0.1, "samples": 1}
+
+        assert body["latency_ms"]["blocked"]["samples"] == 1
+        # The mean stays for compatibility — visibly skewed by the 2s outlier
+        assert body["avg_latency_ms"] > 300.0
+        assert body["latency_ms"]["upstream"]["p50"] < body["avg_latency_ms"]
     finally:
         await client.close()

@@ -7,6 +7,7 @@ API with a Bearer token. API endpoints must still require tokens.
 from __future__ import annotations
 
 import asyncio
+import re
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
@@ -147,3 +148,61 @@ async def test_panel_assets_are_loadable_from_package() -> None:
     assert (PANEL_DIR / "index.html").is_file()
     for name in PANEL_ASSETS:
         assert (PANEL_DIR / name).is_file(), name
+
+
+async def test_panel_suggestions_ui_static_contract() -> None:
+    """The suggestions card ships its table/filter/dialog wiring: every element
+    id referenced by panel.js exists in index.html, and the JS keeps the
+    CSP-safe DOM discipline (no innerHTML/document.write/eval)."""
+    client = await _start()
+    try:
+        html = await (await client.get("/panel")).text()
+        js = await (await client.get("/panel/panel.js")).text()
+        css = await (await client.get("/panel/panel.css")).text()
+    finally:
+        await client.close()
+
+    for element_id in (
+        "suggestions-card",
+        "suggestions-admin",
+        "admin-token-input",
+        "save-admin-token",
+        "suggestions-admin-hint",
+        "suggestions-keyword-only",
+        "approve-keyword",
+        "suggestions-table",
+        "suggestions-tbody",
+        "suggestions-empty",
+        "suggestions-more",
+        "error-suggestions",
+        "suggestions-dialog-backdrop",
+        "suggestions-dialog-list",
+        "suggestions-dialog-more",
+        "suggestions-dialog-confirm",
+        "suggestions-dialog-cancel",
+    ):
+        assert f'id="{element_id}"' in html, element_id
+
+    # Generic contract: every el("...") lookup targets an existing element id.
+    for match in re.findall(r'el\("([a-z0-9-]+)"\)', js):
+        assert f'id="{match}"' in html, match
+
+    # CSP-safe DOM discipline: data is never turned into markup.
+    for banned in ("innerHTML", "outerHTML", "document.write", "eval(", "insertAdjacentHTML"):
+        assert banned not in js, banned
+    assert "textContent" in js
+
+    # Admin-token UX: hint without a token, explicit message on 403, and
+    # domains are always URL-encoded into action paths.
+    assert "Enter admin token to approve." in js
+    assert "This action needs the admin token." in js
+    assert "encodeURIComponent" in js
+
+    # Table, badges and dialog styling ship with the card. Elements whose CSS
+    # sets `display:` must re-hide explicitly — an author display rule beats
+    # the UA [hidden] style (regression: dialog/shown-more stayed visible).
+    assert ".suggestions-table" in css
+    assert ".badge" in css
+    assert ".dialog-backdrop" in css
+    assert ".dialog-backdrop[hidden]" in css
+    assert "#suggestions-more[hidden]" in css

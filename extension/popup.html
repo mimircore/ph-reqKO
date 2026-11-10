@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font-family: system-ui, sans-serif; min-width: 260px; margin: 0; padding: 12px; }
+    h1 { font-size: 0.95rem; margin: 0 0 8px; }
+    .row { display: flex; justify-content: space-between; margin: 4px 0; font-size: 0.85rem; }
+    .label { color: #555; }
+    .error { color: #b3261e; font-size: 0.8rem; margin-top: 8px; }
+    button { font: inherit; padding: 6px 10px; margin-top: 8px; width: 100%; cursor: pointer; }
+    .muted { color: #888; font-size: 0.75rem; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h1>ph-reqKO blocker</h1>
+  <div class="row"><span class="label">Blocked this tab</span><span id="tab-count">–</span></div>
+  <div class="row"><span class="label">Blocked today</span><span id="today-count">–</span></div>
+  <div class="row"><span class="label">Rules</span><span id="rule-count">–</span></div>
+  <div class="row"><span class="label">Last sync</span><span id="last-sync">–</span></div>
+  <div class="error" id="error" hidden></div>
+  <button id="sync-now">Sync now</button>
+  <button id="pause-site">Pause on this site</button>
+  <button id="resume-site" hidden>Resume this site</button>
+  <button id="toggle-cosmetic"></button>
+  <div class="muted">Rules come from your own ph-reqKO server. No third-party services.</div>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

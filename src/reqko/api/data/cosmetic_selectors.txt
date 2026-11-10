@@ -1,0 +1,42 @@
+# ph-reqKO cosmetic filtering: generic CSS selectors for common ad containers.
+# One selector per line; lines starting with # are comments.
+# Validators (server AND extension) reject anything containing {, }, <, >,
+# @import, url(, expression, javascript: or behavior — this file must stay a
+# plain, conservative selector list. Edited in-repo only; no external sources.
+.adsbygoogle
+ins.adsbygoogle
+[id^="google_ads_iframe"]
+[id^="div-gpt-ad"]
+[id^="google_dfp_"]
+.ad-banner
+.ad-banner-container
+.ad-container
+.ad-wrapper
+.ad-slot
+.ad-placeholder
+.advertisement
+.advertisement-label
+.advert
+.advert-box
+.advert-sidebar
+.adsbox
+.ads-area
+.ad-zone
+.ad-label
+[data-ad-slot]
+[data-ad-client]
+[data-adtest]
+.ad-sidebar
+.ad-bottom
+.ad-horizontal
+.ad-leaderboard
+.ad-medium-rectangle
+.ad-rectangle
+.ad-skyscraper
+.amp-ad-container
+.partner-ad
+.sponsored-ad
+.sponsored-label
+.display-ad
+.google-ad
+.google-ads

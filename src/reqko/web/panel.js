@@ -6,8 +6,10 @@
   var TOKEN_KEY = "reqko_token";
   var REFRESH_MS = 10000;
   var MAX_BARS = 8;
+  var SUGGEST_LIMIT = 20;
+  var DIALOG_MAX_ITEMS = 50;
 
-  var state = { bucket: "hour", timer: null };
+  var state = { bucket: "hour", timer: null, suggestions: [], suggestLimit: SUGGEST_LIMIT };
 
   function el(id) {
     return document.getElementById(id);
@@ -85,9 +87,271 @@
     el("tile-total").textContent = String(data.total_queries);
     el("tile-blocked").textContent = data.blocked_percentage + "%";
     el("tile-cache").textContent = data.cache_hit_percentage + "%";
+    el("tile-browser").textContent = String(data.browser_blocked);
+    /* Headline latency is the upstream p95 — the mean is skewed by rare
+       upstream-failure outliers (perf-latency). */
+    var upstreamLatency = data.latency_ms && data.latency_ms.upstream;
     el("tile-latency").textContent =
-      data.avg_latency_ms === null ? "–" : data.avg_latency_ms + " ms";
+      upstreamLatency && upstreamLatency.samples > 0
+        ? upstreamLatency.p95 + " ms"
+        : "–";
   }
+
+  /* ── suggested domains (adaptive discovery) ── */
+
+  var ADMIN_KEY = "reqko_admin_token";
+
+  function getAdminToken() {
+    return window.sessionStorage.getItem(ADMIN_KEY);
+  }
+
+  function adminFetch(path, method) {
+    /* The admin token is only sent for approve/reject actions — the
+       suggestion list itself is fetched with the read token. */
+    return fetch(path, {
+      method: method || "GET",
+      headers: { Authorization: "Bearer " + getAdminToken() },
+    }).then(function (resp) {
+      if (resp.status === 401 || resp.status === 403) {
+        var err = new Error("forbidden");
+        err.forbidden = true;
+        throw err;
+      }
+      if (!resp.ok) throw new Error("HTTP " + resp.status + " for " + path);
+      return resp.json();
+    });
+  }
+
+  function isKeywordSuggestion(row) {
+    var reasons = row.reasons || [];
+    for (var i = 0; i < reasons.length; i += 1) {
+      if (String(reasons[i]).indexOf("keyword:") === 0) return true;
+    }
+    return false;
+  }
+
+  function keywordSuggestions() {
+    return state.suggestions.filter(isKeywordSuggestion);
+  }
+
+  function sortedSuggestions() {
+    var rows = state.suggestions.slice();
+    if (el("suggestions-keyword-only").checked) {
+      rows = rows.filter(isKeywordSuggestion);
+    }
+    rows.sort(function (a, b) {
+      if (b.score !== a.score) return b.score - a.score;
+      if (b.hits !== a.hits) return b.hits - a.hits;
+      return a.domain < b.domain ? -1 : (a.domain > b.domain ? 1 : 0);
+    });
+    return rows;
+  }
+
+  function suggestionBadges(cell, reasons) {
+    (reasons || []).forEach(function (reason) {
+      var badge = document.createElement("span");
+      var keyword = String(reason).indexOf("keyword:") === 0;
+      badge.className = keyword ? "badge badge-keyword" : "badge";
+      badge.textContent = String(reason);
+      cell.appendChild(badge);
+    });
+  }
+
+  function suggestionActions(row) {
+    /* Approve/Reject appear only with a saved admin token; the card-level
+       hint "Enter admin token to approve." covers the no-token case. */
+    var cell = document.createElement("td");
+    cell.className = "suggestion-actions";
+    if (getAdminToken()) {
+      var approve = document.createElement("button");
+      approve.type = "button";
+      approve.className = "approve";
+      approve.textContent = "Approve";
+      approve.addEventListener("click", function () {
+        decideSuggestion(row.domain, "approve");
+      });
+      var reject = document.createElement("button");
+      reject.type = "button";
+      reject.className = "reject";
+      reject.textContent = "Reject";
+      reject.addEventListener("click", function () {
+        decideSuggestion(row.domain, "reject");
+      });
+      cell.appendChild(approve);
+      cell.appendChild(reject);
+    } else {
+      cell.textContent = "\u2014";
+    }
+    return cell;
+  }
+
+  function suggestionRow(row) {
+    var tr = document.createElement("tr");
+    var domain = document.createElement("td");
+    domain.className = "suggestion-domain";
+    domain.textContent = row.domain;
+    tr.appendChild(domain);
+    var score = document.createElement("td");
+    score.className = "suggestion-score";
+    score.textContent = String(row.score);
+    tr.appendChild(score);
+    var reasons = document.createElement("td");
+    suggestionBadges(reasons, row.reasons);
+    tr.appendChild(reasons);
+    var hits = document.createElement("td");
+    hits.textContent = String(row.hits);
+    tr.appendChild(hits);
+    tr.appendChild(suggestionActions(row));
+    return tr;
+  }
+
+  function renderSuggestions() {
+    var adminToken = getAdminToken();
+    el("suggestions-admin").hidden = Boolean(adminToken);
+    el("suggestions-admin-hint").hidden =
+      Boolean(adminToken) || state.suggestions.length === 0;
+    var rows = sortedSuggestions();
+    el("approve-keyword").hidden = !(adminToken && keywordSuggestions().length > 0);
+    var shown = rows.slice(0, state.suggestLimit);
+    var tbody = el("suggestions-tbody");
+    tbody.textContent = "";
+    shown.forEach(function (row) {
+      tbody.appendChild(suggestionRow(row));
+    });
+    el("suggestions-table").hidden = shown.length === 0;
+    var empty = el("suggestions-empty");
+    if (state.suggestions.length === 0) {
+      empty.textContent = "No suggested domains yet.";
+      empty.hidden = false;
+    } else if (shown.length === 0) {
+      empty.textContent = "No suggestions match the keyword filter.";
+      empty.hidden = false;
+    } else {
+      empty.hidden = true;
+    }
+    var more = el("suggestions-more");
+    var remaining = rows.length - shown.length;
+    more.hidden = remaining <= 0;
+    if (remaining > 0) {
+      more.textContent = "Show more (" + remaining + " hidden)";
+    }
+  }
+
+  function refreshSuggestions() {
+    el("suggestions-card").hidden = false;
+    var adminToken = getAdminToken();
+    el("suggestions-admin").hidden = Boolean(adminToken);
+    el("suggestions-admin-hint").hidden = Boolean(adminToken);
+    return apiFetch("/api/v1/suggestions?status=pending&limit=500")
+      .then(function (data) {
+        state.suggestions = data.suggestions || [];
+        renderSuggestions();
+      })
+      .catch(function (err) {
+        if (err.unauthorized) throw err;
+        showError("error-suggestions", "Failed to load suggestions: " + err.message);
+      });
+  }
+
+  function decideSuggestion(domain, decision) {
+    adminFetch(
+      "/api/v1/suggestions/" + encodeURIComponent(domain) + "/" + decision,
+      "POST"
+    )
+      .then(function () { return refreshSuggestions(); })
+      .catch(function (err) {
+        if (err.forbidden) {
+          showError("error-suggestions", "This action needs the admin token.");
+          return;
+        }
+        showError("error-suggestions", "Failed to " + decision + ": " + err.message);
+      });
+  }
+
+  function openKeywordDialog() {
+    var rows = keywordSuggestions();
+    if (rows.length === 0) return;
+    var list = el("suggestions-dialog-list");
+    list.textContent = "";
+    rows.slice(0, DIALOG_MAX_ITEMS).forEach(function (row) {
+      var li = document.createElement("li");
+      var name = document.createElement("span");
+      name.className = "suggestion-domain";
+      name.textContent = row.domain;
+      li.appendChild(name);
+      var meta = document.createElement("span");
+      meta.className = "muted";
+      meta.textContent = " \u00b7 score " + row.score + " \u00b7 hits " + row.hits;
+      li.appendChild(meta);
+      list.appendChild(li);
+    });
+    var more = el("suggestions-dialog-more");
+    if (rows.length > DIALOG_MAX_ITEMS) {
+      more.textContent = "\u2026and " + (rows.length - DIALOG_MAX_ITEMS) + " more.";
+      more.hidden = false;
+    } else {
+      more.hidden = true;
+    }
+    el("suggestions-dialog-confirm").textContent =
+      "Approve " + rows.length + " domain" + (rows.length === 1 ? "" : "s");
+    el("suggestions-dialog-backdrop").hidden = false;
+  }
+
+  function closeKeywordDialog() {
+    el("suggestions-dialog-backdrop").hidden = true;
+  }
+
+  function approveKeywordSuggestions() {
+    var rows = keywordSuggestions();
+    closeKeywordDialog();
+    var failed = 0;
+    var forbidden = false;
+    /* Sequential: one approve request per domain, in sorted order. */
+    var chain = Promise.resolve();
+    rows.forEach(function (row) {
+      chain = chain.then(function () {
+        return adminFetch(
+          "/api/v1/suggestions/" + encodeURIComponent(row.domain) + "/approve",
+          "POST"
+        ).catch(function (err) {
+          if (err.forbidden) forbidden = true;
+          failed += 1;
+        });
+      });
+    });
+    chain.then(function () {
+      if (forbidden) {
+        showError("error-suggestions", "This action needs the admin token.");
+      } else if (failed > 0) {
+        showError(
+          "error-suggestions",
+          failed + " of " + rows.length + " approvals failed."
+        );
+      }
+      return refreshSuggestions();
+    });
+  }
+
+  el("suggestions-keyword-only").addEventListener("change", renderSuggestions);
+  el("suggestions-more").addEventListener("click", function () {
+    state.suggestLimit += SUGGEST_LIMIT;
+    renderSuggestions();
+  });
+  el("approve-keyword").addEventListener("click", openKeywordDialog);
+  el("suggestions-dialog-cancel").addEventListener("click", closeKeywordDialog);
+  el("suggestions-dialog-confirm").addEventListener(
+    "click",
+    approveKeywordSuggestions
+  );
+
+  el("save-admin-token").addEventListener("click", function () {
+    var value = el("admin-token-input").value.trim();
+    if (value) {
+      window.sessionStorage.setItem(ADMIN_KEY, value);
+      el("admin-token-input").value = "";
+      renderSuggestions();
+    }
+  });
 
   /* ── time series line chart (total vs blocked) ─────────────────────────── */
 
@@ -299,7 +563,12 @@
           "auto-refresh every " + REFRESH_MS / 1000 + " s · updated " +
           new Date().toLocaleTimeString();
         renderSummary(data);
-        return Promise.allSettled([refreshTimeseries(), refreshTopDomains(), refreshTopClients()]);
+        return Promise.allSettled([
+          refreshTimeseries(),
+          refreshTopDomains(),
+          refreshTopClients(),
+          refreshSuggestions(),
+        ]);
       })
       .catch(function (err) {
         if (err.unauthorized) {

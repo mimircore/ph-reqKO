@@ -74,6 +74,10 @@ process_query() ──put_nowait──▶ asyncio.Queue(maxsize=10000) ──▶
 | `POST` | `/api/v1/blocklist/custom` | Bearer (admin) | Добавить блокировку (FR-19) | 201, 400 |
 | `DELETE` | `/api/v1/blocklist/custom/{domain}` | Bearer (admin) | Удалить блокировку (FR-19) | 200, 404 |
 | `POST` | `/api/v1/blocklists/update` | Bearer (admin) | Фоновое обновление списков (FR-10, FR-15) | 202, 400, 409 |
+| `GET` | `/api/v1/suggestions?status=&limit=` | Bearer (read) | Предложения доменов: pending/approved/rejected (см. [06-domain-suggestions](06-domain-suggestions.md)) | 200, 400 |
+| `POST` | `/api/v1/suggestions/analyze` | Bearer (admin) | Немедленный анализ query_log | 200 |
+| `POST` | `/api/v1/suggestions/{domain}/approve` | Bearer (admin) | Одобрить: добавить правило blocklist + пометить approved | 200, 400, 404 |
+| `POST` | `/api/v1/suggestions/{domain}/reject` | Bearer (admin) | Отклонить (анализатор больше не предлагает) | 200, 404 |
 
 Пагинация: `limit` от 1 до 500 (`top-*` до 100), `offset` ≥ 0. `from`/`to` — ISO 8601 (дата трактуется как полный день для `to`). Домены валидируются `normalize_domain` (нижний регистр, без замыкающей точки).
 

@@ -1,0 +1,51 @@
+{
+  "manifest_version": 3,
+  "name": "ph-reqKO blocker",
+  "version": "0.1.0",
+  "description": "Blocks ad and tracker domains using your own ph-reqKO server lists. No external services.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "ph-reqko-blocker@ph-reqko.local",
+      "strict_min_version": "113.0"
+    }
+  },
+  "permissions": [
+    "declarativeNetRequest",
+    "declarativeNetRequestFeedback",
+    "activeTab",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "scripts": ["background.js"],
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "js": ["content.js"],
+      "matches": ["http://*/*", "https://*/*"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "ph-reqKO"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": false
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'"
+  }
+}

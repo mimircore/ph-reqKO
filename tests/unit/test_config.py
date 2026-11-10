@@ -153,3 +153,43 @@ def test_config_invalid_values_raise(env_var: str, val: str, match: str) -> None
     env = {"REQKO_ADMIN_TOKEN": "valid-key", env_var: val}
     with pytest.raises(ConfigError, match=match):
         Config.from_env(env)
+
+
+def test_config_suggestion_and_refresh_defaults_and_overrides() -> None:
+    cfg = Config.from_env({"REQKO_ADMIN_TOKEN": "valid-key"})
+    assert cfg.suggest_window_hours == 24
+    assert cfg.suggest_min_hits == 2
+    assert cfg.suggest_interval_minutes == 15
+    assert cfg.suggest_auto_approve_score is None
+    assert cfg.blocklist_refresh_hours == 24
+
+    cfg = Config.from_env(
+        {
+            "REQKO_ADMIN_TOKEN": "valid-key",
+            "REQKO_SUGGEST_WINDOW_HOURS": "48",
+            "REQKO_SUGGEST_MIN_HITS": "3",
+            "REQKO_SUGGEST_INTERVAL_MINUTES": "0",
+            "REQKO_SUGGEST_AUTO_APPROVE_SCORE": "5",
+            "REQKO_BLOCKLIST_REFRESH_HOURS": "6",
+        }
+    )
+    assert cfg.suggest_window_hours == 48
+    assert cfg.suggest_min_hits == 3
+    assert cfg.suggest_interval_minutes == 0
+    assert cfg.suggest_auto_approve_score == 5
+    assert cfg.blocklist_refresh_hours == 6
+
+
+@pytest.mark.parametrize(
+    ("env_var", "val"),
+    [
+        ("REQKO_SUGGEST_INTERVAL_MINUTES", "-1"),
+        ("REQKO_SUGGEST_AUTO_APPROVE_SCORE", "0"),
+        ("REQKO_SUGGEST_AUTO_APPROVE_SCORE", "abc"),
+        ("REQKO_BLOCKLIST_REFRESH_HOURS", "-1"),
+    ],
+)
+def test_config_suggestion_invalid_values_raise(env_var: str, val: str) -> None:
+    env = {"REQKO_ADMIN_TOKEN": "valid-key", env_var: val}
+    with pytest.raises(ConfigError, match=env_var):
+        Config.from_env(env)

@@ -24,6 +24,7 @@ from reqko.dns.protocol import (
     parse_wire,
 )
 from reqko.dns.ratelimit import RateLimiter
+from reqko.dns.upstream import UpstreamResult
 from reqko.filtering.engine import FilterEngine, FilterSnapshot
 from reqko.metrics.exporter import DURATION_BUCKETS, MetricsRegistry, qtype_label
 
@@ -151,7 +152,7 @@ async def test_counters_increment_on_the_right_events() -> None:
     fake = _a_response(1, "live.test", "9.9.9.10")
     with patch(
         "reqko.dns.pipeline.query_upstream",
-        new=AsyncMock(return_value=(fake, "127.0.0.1:53")),
+        new=AsyncMock(return_value=UpstreamResult(response=fake, upstream="127.0.0.1:53", attempts=1)),
     ):
         await process_query(_query("live.test"), "127.0.0.1", cfg, protocol="udp")
         await process_query(_query("live.test", qid=2), "127.0.0.1", cfg, protocol="udp")  # cached
@@ -203,7 +204,7 @@ async def test_blocked_cname_reason_and_unknown_qtype_mapped() -> None:
     )
     with patch(
         "reqko.dns.pipeline.query_upstream",
-        new=AsyncMock(return_value=(cname_response, "127.0.0.1:53")),
+        new=AsyncMock(return_value=UpstreamResult(response=cname_response, upstream="127.0.0.1:53", attempts=1)),
     ):
         await process_query(_query("portal.test"), "127.0.0.1", cfg)
 
@@ -256,7 +257,7 @@ async def test_active_rules_gauge_tracks_snapshot_changes() -> None:
     fake = _a_response(1, "gauge.test")
     with patch(
         "reqko.dns.pipeline.query_upstream",
-        new=AsyncMock(return_value=(fake, "127.0.0.1:53")),
+        new=AsyncMock(return_value=UpstreamResult(response=fake, upstream="127.0.0.1:53", attempts=1)),
     ):
         wire = parse_wire(await process_query(_query("gauge.test"), "127.0.0.1", cfg))
     assert wire.answers[0].rdata == "1.2.3.4"
@@ -291,7 +292,7 @@ async def test_resolver_answers_when_registry_raises() -> None:
 
     with patch(
         "reqko.dns.pipeline.query_upstream",
-        new=AsyncMock(return_value=(fake, "127.0.0.1:53")),
+        new=AsyncMock(return_value=UpstreamResult(response=fake, upstream="127.0.0.1:53", attempts=1)),
     ):
         wire = parse_wire(await process_query(_query("still-works.test"), "127.0.0.1", cfg))
 
@@ -303,7 +304,7 @@ async def test_resolver_answers_without_metrics_at_all() -> None:
     fake = _a_response(1, "no-metrics.test")
     with patch(
         "reqko.dns.pipeline.query_upstream",
-        new=AsyncMock(return_value=(fake, "127.0.0.1:53")),
+        new=AsyncMock(return_value=UpstreamResult(response=fake, upstream="127.0.0.1:53", attempts=1)),
     ):
         wire = parse_wire(await process_query(_query("no-metrics.test"), "127.0.0.1", cfg))
     assert wire.answers[0].rdata == "1.2.3.4"
@@ -366,7 +367,7 @@ async def test_metrics_site_failure_does_not_break_dns_server() -> None:
     fake = _a_response(1, "independent.test")
     with patch(
         "reqko.dns.pipeline.query_upstream",
-        new=AsyncMock(return_value=(fake, "127.0.0.1:53")),
+        new=AsyncMock(return_value=UpstreamResult(response=fake, upstream="127.0.0.1:53", attempts=1)),
     ):
         wire = parse_wire(await process_query(_query("independent.test"), "127.0.0.1", cfg))
     assert wire.answers[0].rdata == "1.2.3.4"

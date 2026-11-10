@@ -2,7 +2,8 @@
 
 Tokens are never stored in plain text: only their SHA-256 hashes are kept,
 and comparison uses hmac.compare_digest (timing-safe). Scopes: "admin"
-(ALL methods) and "read" (GET only). /health is public.
+(ALL methods), "read" (GET only), and "client" (browser extension: ONLY
+the two /api/v1/extension/* endpoints). /health is public.
 """
 
 from __future__ import annotations
@@ -30,12 +31,14 @@ class TokenStore:
         self,
         admin_token_hash: str | None,
         read_token_hash: str | None = None,
+        client_token_hash: str | None = None,
     ) -> None:
         self._admin_hash = admin_token_hash
         self._read_hash = read_token_hash
+        self._client_hash = client_token_hash
 
     def scope_for(self, token: str | None) -> str | None:
-        """Returns "admin", "read", or None when the token is unknown."""
+        """Returns "admin", "read", "client", or None when unknown."""
         if not token:
             return None
         digest = hash_token(token)
@@ -43,6 +46,8 @@ class TokenStore:
             return "admin"
         if self._read_hash and constant_time_equals(digest, self._read_hash):
             return "read"
+        if self._client_hash and constant_time_equals(digest, self._client_hash):
+            return "client"
         return None
 
 

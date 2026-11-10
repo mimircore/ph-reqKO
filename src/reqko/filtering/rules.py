@@ -4,6 +4,10 @@ Custom domains are stored in the custom_rules table and merged into the
 FilterSnapshot on every change via an atomic reference swap, so the DNS
 hot path never locks and never restarts. Blocklist refreshes replace the
 base snapshot; custom rules survive them.
+
+Two syntaxes are supported: "exact" (matches the domain only) and
+"wildcard" (matches the domain and all subdomains) — domain suggestions
+approve base domains as wildcard rules.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ from reqko.filtering.parser import normalize_domain
 logger = logging.getLogger(__name__)
 
 LAST_UPDATE_KEY = "blocklists_last_update"
+VALID_SYNTAXES = ("exact", "wildcard")
 
 
 class RuleManager:
@@ -29,6 +34,8 @@ class RuleManager:
         self._base = engine.snapshot
         self._custom_allows: set[str] = set()
         self._custom_blocks: set[str] = set()
+        self._custom_wildcard_allows: set[str] = set()
+        self._custom_wildcard_blocks: set[str] = set()
         self._version = engine.snapshot.version
         self.last_update: str | None = None
         # Optional callback invoked with the new rule count after every
@@ -40,13 +47,19 @@ class RuleManager:
     def load_persisted(self) -> None:
         """Loads enabled custom rules and the last update marker from the DB."""
         cur = self._conn.execute(
-            "SELECT domain, rule_type FROM custom_rules WHERE enabled = 1"
+            "SELECT domain, rule_type, syntax_type FROM custom_rules WHERE enabled = 1"
         )
-        for domain, rule_type in cur.fetchall():
+        for domain, rule_type, syntax_type in cur.fetchall():
+            domain_str = str(domain)
+            syntax = str(syntax_type) if syntax_type in VALID_SYNTAXES else "exact"
             if rule_type == "whitelist":
-                self._custom_allows.add(str(domain))
+                (self._custom_wildcard_allows if syntax == "wildcard" else self._custom_allows).add(
+                    domain_str
+                )
             elif rule_type == "blacklist":
-                self._custom_blocks.add(str(domain))
+                (self._custom_wildcard_blocks if syntax == "wildcard" else self._custom_blocks).add(
+                    domain_str
+                )
         self.last_update = self._read_last_update()
         self._apply()
 
@@ -82,9 +95,9 @@ class RuleManager:
         self._version += 1
         snapshot = FilterSnapshot(
             exact_set=self._base.exact_set | self._custom_blocks,
-            wildcard_set=self._base.wildcard_set,
+            wildcard_set=self._base.wildcard_set | self._custom_wildcard_blocks,
             allow_exact_set=self._base.allow_exact_set | self._custom_allows,
-            allow_wildcard_set=self._base.allow_wildcard_set,
+            allow_wildcard_set=self._base.allow_wildcard_set | self._custom_wildcard_allows,
             version=self._version,
             rules_count=0,  # auto-computed from the merged sets
         )
@@ -99,37 +112,47 @@ class RuleManager:
             snapshot.version,
             snapshot.rules_count,
             self._base.rules_count,
-            len(self._custom_allows) + len(self._custom_blocks),
+            len(self._custom_allows)
+            + len(self._custom_blocks)
+            + len(self._custom_wildcard_allows)
+            + len(self._custom_wildcard_blocks),
         )
 
     # ── CRUD (synchronous; API handlers call these via the executor) ─────────
 
-    def add_rule(self, rule_type: str, domain: str) -> str:
+    def add_rule(self, rule_type: str, domain: str, syntax: str = "exact") -> str:
         """Adds a custom rule; returns the normalized domain.
 
-        Raises ValueError for an invalid domain.
+        syntax: "exact" (domain only) or "wildcard" (domain + subdomains).
+        Raises ValueError for an invalid domain or syntax.
         """
+        if syntax not in VALID_SYNTAXES:
+            raise ValueError(f"Invalid syntax: {syntax!r}")
         normalized = normalize_domain(domain)
         if normalized is None:
             raise ValueError(f"Invalid domain: {domain!r}")
         self._conn.execute(
             """
             INSERT INTO custom_rules (rule_type, syntax_type, domain, enabled)
-            VALUES (?, 'exact', ?, 1)
+            VALUES (?, ?, ?, 1)
             ON CONFLICT(rule_type, domain) DO UPDATE SET enabled = 1
             """,
-            (rule_type, normalized),
+            (rule_type, syntax, normalized),
         )
         self._conn.commit()
         if rule_type == "whitelist":
-            self._custom_allows.add(normalized)
+            (self._custom_wildcard_allows if syntax == "wildcard" else self._custom_allows).add(
+                normalized
+            )
         else:
-            self._custom_blocks.add(normalized)
+            (self._custom_wildcard_blocks if syntax == "wildcard" else self._custom_blocks).add(
+                normalized
+            )
         self._apply()
         return normalized
 
     def remove_rule(self, rule_type: str, domain: str) -> bool:
-        """Removes a custom rule; returns True if it existed."""
+        """Removes a custom rule (both syntaxes); returns True if it existed."""
         normalized = normalize_domain(domain)
         if normalized is None:
             raise ValueError(f"Invalid domain: {domain!r}")
@@ -139,10 +162,10 @@ class RuleManager:
         )
         self._conn.commit()
         existed = bool(cur.rowcount)
-        if rule_type == "whitelist":
-            self._custom_allows.discard(normalized)
-        else:
-            self._custom_blocks.discard(normalized)
+        self._custom_allows.discard(normalized)
+        self._custom_blocks.discard(normalized)
+        self._custom_wildcard_allows.discard(normalized)
+        self._custom_wildcard_blocks.discard(normalized)
         if existed:
             self._apply()
         return existed
@@ -151,16 +174,16 @@ class RuleManager:
         """Returns enabled custom rules, optionally filtered by rule_type."""
         if rule_type is None:
             cur = self._conn.execute(
-                "SELECT rule_type, domain FROM custom_rules WHERE enabled = 1 "
+                "SELECT rule_type, domain, syntax_type FROM custom_rules WHERE enabled = 1 "
                 "ORDER BY rule_type, domain"
             )
         else:
             cur = self._conn.execute(
-                "SELECT rule_type, domain FROM custom_rules WHERE enabled = 1 "
+                "SELECT rule_type, domain, syntax_type FROM custom_rules WHERE enabled = 1 "
                 "AND rule_type = ? ORDER BY domain",
                 (rule_type,),
             )
         return [
-            {"type": str(rtype), "domain": str(domain)}
-            for rtype, domain in cur.fetchall()
+            {"type": str(rtype), "domain": str(domain), "syntax": str(syntax)}
+            for rtype, domain, syntax in cur.fetchall()
         ]

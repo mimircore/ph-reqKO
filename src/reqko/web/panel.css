@@ -131,6 +131,175 @@ canvas { width: 100%; height: 240px; display: block; }
 
 .error { color: var(--error); font-size: 0.9rem; }
 
+/* ── suggested domains (adaptive discovery) ────────────────────────────────── */
+
+.suggestions-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.suggestions-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: var(--text);
+}
+
+.btn {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.btn:hover { border-color: var(--accent); }
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.suggestions-wrap { overflow-x: auto; }
+
+.suggestions-table {
+  width: 100%;
+  min-width: 460px;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.suggestions-table th {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.suggestions-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.suggestions-table tbody tr:last-child td { border-bottom: none; }
+
+.suggestion-domain {
+  word-break: break-all;
+  font-variant-numeric: tabular-nums;
+}
+
+.suggestion-score { font-variant-numeric: tabular-nums; }
+
+.suggestions-table td:first-child { font-weight: 600; }
+
+.badge {
+  display: inline-block;
+  margin: 1px 3px 1px 0;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.72rem;
+  background: transparent;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.badge-keyword {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.suggestion-actions button {
+  font: inherit;
+  font-size: 0.78rem;
+  padding: 3px 10px;
+  margin-right: 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.suggestion-actions button.approve {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.suggestion-actions button.reject { color: var(--blocked); border-color: var(--blocked); }
+
+#suggestions-more { display: block; margin: 10px 0 0; }
+
+/* author display rules beat the UA [hidden] style — re-hide explicitly */
+#suggestions-more[hidden] { display: none; }
+
+@media (max-width: 560px) {
+  .suggestions-table th, .suggestions-table td { padding: 5px 6px; }
+  .suggestion-actions button { padding: 3px 8px; margin-right: 4px; }
+  .suggestions-toolbar { flex-direction: column; align-items: stretch; }
+  .suggestions-toolbar .btn { width: 100%; }
+}
+
+/* ── confirmation dialog (approve all keyword-based) ───────────────────────── */
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+/* author display rule beats the UA [hidden] style — re-hide explicitly */
+.dialog-backdrop[hidden] { display: none; }
+
+.dialog {
+  width: 100%;
+  max-width: 520px;
+  max-height: 80vh;
+  overflow-y: auto;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card-bg);
+  color: var(--text);
+}
+
+.dialog h3 { margin: 0 0 8px; font-size: 1rem; }
+
+.dialog ul {
+  margin: 8px 0;
+  padding-left: 20px;
+  font-size: 0.85rem;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
 code {
   background: var(--accent-soft);
   border-radius: 4px;

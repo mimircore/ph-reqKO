@@ -1,0 +1,33 @@
+# ph-reqKO: protected registrable bases that are NEVER suggested as
+# ad/tracker domains (adaptive discovery). One base per line; lines starting
+# with # are comments. Wildcard entries use * as the leftmost label token
+# (e.g. firebase* covers firebase.com, firebaseio.com-style bases;
+# connectivitycheck.* covers connectivitycheck.gstatic.com etc.).
+#
+# Rationale: these are critical infrastructure / login / CDN bases where a
+# false-positive wildcard block breaks large parts of the internet.
+google.com
+googleapis.com
+gstatic.com
+googleusercontent.com
+facebook.com
+fbcdn.net
+instagram.com
+whatsapp.com
+microsoft.com
+windows.com
+apple.com
+icloud.com
+cloudflare.com
+amazonaws.com
+github.com
+miui.com
+xiaomi.com
+# Service/SDK bases whose subdomains break pages or logins when blocked by a
+# false-positive suggestion: connect.facebook.net (Facebook SDK),
+# favicon.yandex.net (Yandex favicon service).
+facebook.net
+yandex.net
+firebase*
+connectivitycheck.*
+msftconnecttest.com

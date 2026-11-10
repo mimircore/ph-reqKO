@@ -31,7 +31,8 @@
       <div class="tile"><span class="tile-label">Total queries</span><span class="tile-value" id="tile-total">–</span></div>
       <div class="tile"><span class="tile-label">Blocked</span><span class="tile-value" id="tile-blocked">–</span></div>
       <div class="tile"><span class="tile-label">Cache hit</span><span class="tile-value" id="tile-cache">–</span></div>
-      <div class="tile"><span class="tile-label">Avg latency</span><span class="tile-value" id="tile-latency">–</span></div>
+      <div class="tile"><span class="tile-label">Blocked in browser</span><span class="tile-value" id="tile-browser">–</span></div>
+      <div class="tile"><span class="tile-label">Latency p95 (upstream)</span><span class="tile-value" id="tile-latency">–</span></div>
     </section>
 
     <section class="card">
@@ -58,7 +59,55 @@
         <p id="error-top-clients" class="error" hidden></p>
       </section>
     </div>
+
+    <section class="card" id="suggestions-card" hidden>
+      <h2>Suggested domains</h2>
+      <p class="muted">Adaptive discovery from your query log. Approve adds a blocklist rule; Reject marks the suggestion for the analyzer to skip.</p>
+      <div id="suggestions-admin" hidden>
+        <label for="admin-token-input">Admin token (kept in sessionStorage only, sent only when you approve or reject)</label>
+        <input id="admin-token-input" type="password" autocomplete="off" spellcheck="false">
+        <button id="save-admin-token">Save admin token</button>
+      </div>
+      <p id="suggestions-admin-hint" class="muted" hidden>Enter admin token to approve.</p>
+      <div class="suggestions-toolbar">
+        <label class="suggestions-filter">
+          <input type="checkbox" id="suggestions-keyword-only">
+          Keyword suggestions only
+        </label>
+        <button type="button" id="approve-keyword" class="btn btn-primary" hidden>Approve all keyword-based</button>
+      </div>
+      <div class="suggestions-wrap">
+        <table class="suggestions-table" id="suggestions-table" hidden>
+          <thead>
+            <tr>
+              <th scope="col">Domain</th>
+              <th scope="col">Score</th>
+              <th scope="col">Reasons</th>
+              <th scope="col">Hits</th>
+              <th scope="col">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="suggestions-tbody"></tbody>
+        </table>
+      </div>
+      <p id="suggestions-empty" class="muted" hidden></p>
+      <button type="button" id="suggestions-more" class="btn" hidden>Show more</button>
+      <p id="error-suggestions" class="error" hidden></p>
+    </section>
   </main>
+
+  <div id="suggestions-dialog-backdrop" class="dialog-backdrop" hidden>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="suggestions-dialog-title">
+      <h3 id="suggestions-dialog-title">Approve keyword-based suggestions?</h3>
+      <p class="muted">Each domain below gets an exact blocklist rule immediately. Protected bases are already excluded by the analyzer.</p>
+      <ul id="suggestions-dialog-list"></ul>
+      <p id="suggestions-dialog-more" class="muted" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" id="suggestions-dialog-cancel" class="btn">Cancel</button>
+        <button type="button" id="suggestions-dialog-confirm" class="btn btn-primary">Approve</button>
+      </div>
+    </div>
+  </div>
 
   <p id="global-error" class="error" role="alert" hidden></p>
 </body>

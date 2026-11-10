@@ -19,8 +19,10 @@ from reqko.dns.pipeline import QueryEvent
 
 logger = logging.getLogger(__name__)
 
-# Status -> stats_hourly category mapping (docs/03-architecture.md, section 7.3)
+# Status -> stats_hourly category mapping (docs/03-architecture.md, section 7.3).
+# "BLOCKED" is the aggregated status reported by the browser extension.
 STATUS_CATEGORY: dict[str, str] = {
+    "BLOCKED": "blocked",
     "BLOCKED_BLACKLIST": "blocked",
     "BLOCKED_CNAME": "blocked",
     "CACHED": "cached",
@@ -36,8 +38,9 @@ STATUS_CATEGORY: dict[str, str] = {
 _QUERY_LOG_INSERT = """
 INSERT INTO query_log (
     timestamp, client_ip, question_name, question_type,
-    status, matched_rule, upstream, latency_ms, response_code
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    status, matched_rule, upstream, latency_ms, response_code,
+    source, occurrences
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _STATS_HOURLY_UPSERT = """
@@ -175,23 +178,28 @@ class QueryLogWriter:
                     event.upstream,
                     event.latency_ms,
                     event.response_code,
+                    event.source,
+                    event.occurrences,
                 )
             )
-            total += 1
+            total += event.occurrences
             category = STATUS_CATEGORY.get(event.status)
             if category == "blocked":
-                blocked += 1
+                blocked += event.occurrences
             elif category == "cached":
-                cached += 1
+                cached += event.occurrences
             elif category == "forwarded":
-                forwarded += 1
+                forwarded += event.occurrences
             elif category == "allowed":
-                allowed += 1
+                allowed += event.occurrences
             elif category == "refused":
-                refused += 1
+                refused += event.occurrences
             elif category == "error":
-                errors += 1
-            latency_sum += event.latency_ms
+                errors += event.occurrences
+            # Latency is measured for real DNS queries only; browser reports
+            # carry aggregated counts without a per-query latency.
+            if event.source == "dns":
+                latency_sum += event.latency_ms
 
         try:
             self._conn.execute("BEGIN")
@@ -208,7 +216,8 @@ class QueryLogWriter:
                     refused,
                     errors,
                     latency_sum,
-                    len(events),
+                    # latency samples: only real DNS-measured queries
+                    sum(1 for e in events if e.source == "dns"),
                 ),
             )
             self._conn.commit()

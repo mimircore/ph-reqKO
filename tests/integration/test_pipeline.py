@@ -31,7 +31,7 @@ from reqko.dns.protocol import (
     parse_wire,
 )
 from reqko.dns.ratelimit import RateLimiter
-from reqko.dns.upstream import UpstreamError
+from reqko.dns.upstream import UpstreamError, UpstreamResult
 from reqko.filtering.engine import FilterEngine, FilterSnapshot
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -143,7 +143,7 @@ async def test_acl_allows_lan_ip() -> None:
         parse_wire(raw).header.id, "example.com"
     )
 
-    with patch("reqko.dns.pipeline.query_upstream", new=AsyncMock(return_value=(fake_response, "127.0.0.1:65533"))):
+    with patch("reqko.dns.pipeline.query_upstream", new=AsyncMock(return_value=UpstreamResult(response=fake_response, upstream="127.0.0.1:65533", attempts=1))):
         resp_bytes = await process_query(raw, "192.168.1.100", cfg)
 
     resp = parse_wire(resp_bytes)
@@ -161,7 +161,7 @@ async def test_rate_limit_drops_excessive_requests() -> None:
 
     fake_response = _make_upstream_response(parse_wire(raw).header.id, "example.com")
 
-    with patch("reqko.dns.pipeline.query_upstream", new=AsyncMock(return_value=(fake_response, "127.0.0.1:65533"))):
+    with patch("reqko.dns.pipeline.query_upstream", new=AsyncMock(return_value=UpstreamResult(response=fake_response, upstream="127.0.0.1:65533", attempts=1))):
         resp1 = parse_wire(await process_query(raw, "10.0.0.1", cfg))
         resp2 = parse_wire(await process_query(raw, "10.0.0.1", cfg))
         resp3 = parse_wire(await process_query(raw, "10.0.0.1", cfg))
@@ -260,7 +260,7 @@ async def test_allowlist_overrides_blocklist() -> None:
 
     fake_response = _make_upstream_response(req_pkt.header.id, "safe.adserver.com", "5.5.5.5")
 
-    with patch("reqko.dns.pipeline.query_upstream", new=AsyncMock(return_value=(fake_response, "127.0.0.1:65533"))):
+    with patch("reqko.dns.pipeline.query_upstream", new=AsyncMock(return_value=UpstreamResult(response=fake_response, upstream="127.0.0.1:65533", attempts=1))):
         resp_bytes = await process_query(raw, "127.0.0.1", cfg)
 
     resp = parse_wire(resp_bytes)
@@ -280,11 +280,14 @@ async def test_cache_hit_on_second_request() -> None:
     call_count = 0
 
     async def fake_upstream(
-        pkt: DNSPacket, upstreams: list[tuple[str, int]], timeout: float = 2.0
-    ) -> tuple[DNSPacket, str]:
+        pkt: DNSPacket,
+        upstreams: list[tuple[str, int]],
+        timeout: float = 1.5,
+        health: object = None,
+    ) -> UpstreamResult:
         nonlocal call_count
         call_count += 1
-        return fake_response, "127.0.0.1:65533"
+        return UpstreamResult(response=fake_response, upstream="127.0.0.1:65533", attempts=1)
 
     with patch("reqko.dns.pipeline.query_upstream", side_effect=fake_upstream):
         await process_query(raw, "127.0.0.1", cfg)
@@ -307,7 +310,7 @@ async def test_cache_hit_blocked_by_new_rule() -> None:
     fake_resp = _make_upstream_response(req_pkt.header.id, "newblock.com", "1.1.1.1", ttl=3600)
 
     # First request: forwarded and cached
-    with patch("reqko.dns.pipeline.query_upstream", new=AsyncMock(return_value=(fake_resp, "127.0.0.1:65533"))):
+    with patch("reqko.dns.pipeline.query_upstream", new=AsyncMock(return_value=UpstreamResult(response=fake_resp, upstream="127.0.0.1:65533", attempts=1))):
         resp1_bytes = await process_query(raw, "127.0.0.1", cfg)
     resp1 = parse_wire(resp1_bytes)
     assert resp1.header.rcode == RCODE_NOERROR
@@ -351,7 +354,7 @@ async def test_cname_uncloaking_upstream() -> None:
         req_pkt.header.id, "legit-site.com", "sub.hidden-tracker.com", "1.2.3.4"
     )
 
-    with patch("reqko.dns.pipeline.query_upstream", new=AsyncMock(return_value=(cname_resp, "127.0.0.1:65533"))):
+    with patch("reqko.dns.pipeline.query_upstream", new=AsyncMock(return_value=UpstreamResult(response=cname_resp, upstream="127.0.0.1:65533", attempts=1))):
         resp_bytes = await process_query(raw, "127.0.0.1", cfg)
 
     resp = parse_wire(resp_bytes)
@@ -375,7 +378,7 @@ async def test_cname_uncloaking_from_cache() -> None:
     )
 
     # First request: forwarded and cached (no rules)
-    with patch("reqko.dns.pipeline.query_upstream", new=AsyncMock(return_value=(cname_resp, "127.0.0.1:65533"))):
+    with patch("reqko.dns.pipeline.query_upstream", new=AsyncMock(return_value=UpstreamResult(response=cname_resp, upstream="127.0.0.1:65533", attempts=1))):
         resp1_bytes = await process_query(raw, "127.0.0.1", cfg)
     resp1 = parse_wire(resp1_bytes)
     assert resp1.header.rcode == RCODE_NOERROR
@@ -462,7 +465,7 @@ async def test_first_response_ttl_matches_cached_ttl() -> None:
 
     with patch(
         "reqko.dns.pipeline.query_upstream",
-        new=AsyncMock(return_value=(fake_resp, "upstream.test:53")),
+        new=AsyncMock(return_value=UpstreamResult(response=fake_resp, upstream="upstream.test:53", attempts=1)),
     ):
         resp1 = parse_wire(await process_query(raw, "127.0.0.1", cfg))
 
@@ -503,7 +506,7 @@ async def test_first_response_ttl_exact_with_inexact_mock_clock() -> None:
 
     with patch(
         "reqko.dns.pipeline.query_upstream",
-        new=AsyncMock(return_value=(fake_resp, "upstream.test:53")),
+        new=AsyncMock(return_value=UpstreamResult(response=fake_resp, upstream="upstream.test:53", attempts=1)),
     ):
         resp1 = parse_wire(await process_query(raw, "127.0.0.1", cfg))
 
@@ -530,7 +533,7 @@ async def test_allowlisted_name_in_blocklist_queried_twice_stays_allowed() -> No
 
     with patch(
         "reqko.dns.pipeline.query_upstream",
-        new=AsyncMock(return_value=(fake_resp, "127.0.0.1:65533")),
+        new=AsyncMock(return_value=UpstreamResult(response=fake_resp, upstream="127.0.0.1:65533", attempts=1)),
     ):
         resp1 = parse_wire(await process_query(_make_a_query("dual.com", qid=1), "127.0.0.1", cfg))
         resp2 = parse_wire(await process_query(_make_a_query("dual.com", qid=2), "127.0.0.1", cfg))
@@ -560,7 +563,7 @@ async def test_rule_added_after_cache_blocks_cached_name_with_event() -> None:
 
     with patch(
         "reqko.dns.pipeline.query_upstream",
-        new=AsyncMock(return_value=(fake_resp, "127.0.0.1:65533")),
+        new=AsyncMock(return_value=UpstreamResult(response=fake_resp, upstream="127.0.0.1:65533", attempts=1)),
     ):
         await process_query(raw, "127.0.0.1", cfg)
 
@@ -602,7 +605,7 @@ async def test_allowlisted_cname_to_blocked_target_not_blocked() -> None:
 
     with patch(
         "reqko.dns.pipeline.query_upstream",
-        new=AsyncMock(return_value=(cname_resp, "127.0.0.1:65533")),
+        new=AsyncMock(return_value=UpstreamResult(response=cname_resp, upstream="127.0.0.1:65533", attempts=1)),
     ):
         resp1 = parse_wire(await process_query(_make_a_query("safe.site.com", qid=1), "127.0.0.1", cfg))
         resp2 = parse_wire(await process_query(_make_a_query("safe.site.com", qid=2), "127.0.0.1", cfg))
@@ -621,7 +624,7 @@ async def test_cached_response_with_edns_gets_fresh_opt() -> None:
 
     with patch(
         "reqko.dns.pipeline.query_upstream",
-        new=AsyncMock(return_value=(fake_resp, "127.0.0.1:65533")),
+        new=AsyncMock(return_value=UpstreamResult(response=fake_resp, upstream="127.0.0.1:65533", attempts=1)),
     ):
         resp1 = parse_wire(await process_query(_make_a_query_edns("edns.example.com", qid=1), "127.0.0.1", cfg))
         resp2 = parse_wire(await process_query(_make_a_query_edns("edns.example.com", qid=2, do_flag=True), "127.0.0.1", cfg))
@@ -650,7 +653,7 @@ async def test_cached_response_without_edns_has_no_opt() -> None:
 
     with patch(
         "reqko.dns.pipeline.query_upstream",
-        new=AsyncMock(return_value=(fake_resp, "127.0.0.1:65533")),
+        new=AsyncMock(return_value=UpstreamResult(response=fake_resp, upstream="127.0.0.1:65533", attempts=1)),
     ):
         resp1 = parse_wire(await process_query(_make_a_query("noedns.example.com", qid=1), "127.0.0.1", cfg))
         resp2 = parse_wire(await process_query(_make_a_query("noedns.example.com", qid=2), "127.0.0.1", cfg))
@@ -669,7 +672,7 @@ async def test_event_records_answering_upstream_server() -> None:
 
     with patch(
         "reqko.dns.pipeline.query_upstream",
-        new=AsyncMock(return_value=(fake_resp, "10.9.9.2:5353")),
+        new=AsyncMock(return_value=UpstreamResult(response=fake_resp, upstream="10.9.9.2:5353", attempts=1)),
     ):
         await process_query(_make_a_query("who-answered.com"), "127.0.0.1", cfg)
 

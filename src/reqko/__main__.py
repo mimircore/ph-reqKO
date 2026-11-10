@@ -19,10 +19,17 @@ from reqko.dns.acl import ClientACL
 from reqko.dns.cache import DNSCache
 from reqko.dns.pipeline import PipelineConfig, QueryEvent
 from reqko.dns.ratelimit import RateLimiter
-from reqko.dns.server import run_dns_servers
+from reqko.dns.server import (
+    PROBE_INTERVAL_SECONDS,
+    DnsProbeStatus,
+    DnsUdpWatchdog,
+    LoopLagMonitor,
+    start_dns_servers,
+)
 from reqko.filtering.engine import FilterEngine
 from reqko.filtering.rules import RuleManager
-from reqko.filtering.updater import update_filter_engine
+from reqko.filtering.suggester import run_suggestion_scheduler
+from reqko.filtering.updater import run_blocklist_refresh, update_filter_engine
 from reqko.metrics.exporter import MetricsRegistry, create_metrics_app
 from reqko.storage.migrations import get_db_connection, init_database
 from reqko.storage.retention import RetentionJob
@@ -57,7 +64,8 @@ async def _bootstrap_tokens(config: Config, conn: sqlite3.Connection) -> tuple[T
                 admin_hash = hash_token(generated)
                 set_setting(conn, ADMIN_TOKEN_HASH_KEY, admin_hash)
         read_hash = hash_token(config.read_token) if config.read_token else None
-        return TokenStore(admin_hash, read_hash), generated
+        client_hash = hash_token(config.client_token) if config.client_token else None
+        return TokenStore(admin_hash, read_hash, client_hash), generated
 
     return await loop.run_in_executor(None, _sync)
 
@@ -130,6 +138,32 @@ async def _run(config: Config) -> None:
     writer_task = asyncio.create_task(writer.run(queue), name="query-log-writer")
     retention = RetentionJob(retention_conn, retention_days=config.log_retention_days)
     retention_task = asyncio.create_task(retention.run_forever(), name="retention")
+    stop_event = asyncio.Event()
+    suggest_stop = asyncio.Event()
+    suggest_task: asyncio.Task[int] | None = None
+    if config.suggest_interval_minutes > 0:
+        suggest_task = asyncio.create_task(
+            run_suggestion_scheduler(
+                conn,
+                engine,
+                rule_manager,
+                window_hours=config.suggest_window_hours,
+                min_hits=config.suggest_min_hits,
+                interval_minutes=config.suggest_interval_minutes,
+                auto_approve_score=config.suggest_auto_approve_score,
+                stop_event=suggest_stop,
+            ),
+            name="domain-suggestions",
+        )
+    refresh_stop = asyncio.Event()
+    refresh_task: asyncio.Task[None] | None = None
+    if config.blocklist_refresh_hours > 0 and config.blocklist_urls:
+        refresh_task = asyncio.create_task(
+            run_blocklist_refresh(
+                config, engine, rule_manager, refresh_stop, allowed_dirs
+            ),
+            name="blocklist-refresh",
+        )
 
     # ── DNS servers ─────────────────────────────────────────────────────────
     acl = ClientACL(config.allowed_networks)
@@ -155,19 +189,45 @@ async def _run(config: Config) -> None:
         metrics=metrics,
     )
 
-    udp_transport, tcp_server = await run_dns_servers(
+    dns_handles = await start_dns_servers(
         pipeline_cfg,
         dns_host=config.dns_host,
         dns_port=config.dns_port,
         tcp_max_connections=config.max_tcp_connections,
         tcp_idle_timeout=config.tcp_idle_timeout,
     )
+
+    # ── UDP self-probe watchdog (Windows WinError 10054 hardening) ──────────
+    # The watchdog probes 127.0.0.1:<port>, so it can only run when the DNS
+    # listener is reachable via loopback (wildcard or loopback bind).
+    dns_probe = DnsProbeStatus()
+    watchdog_stop = asyncio.Event()
+    watchdog_task: asyncio.Task[None] | None = None
+    if config.dns_host in ("0.0.0.0", "::", "127.0.0.1", "::1", "localhost"):
+        watchdog_task = asyncio.create_task(
+            DnsUdpWatchdog(dns_handles.udp, dns_probe).run(watchdog_stop),
+            name="udp-self-probe",
+        )
+        logger.info(
+            "UDP self-probe watchdog active (interval %ds)",
+            int(PROBE_INTERVAL_SECONDS),
+        )
+    else:
+        logger.info(
+            "UDP self-probe watchdog disabled: DNS bound to %s (not loopback-reachable)",
+            config.dns_host,
+        )
     logger.info(
         "ph-reqKO DNS resolver ready on %s:%d (UDP+TCP, block_mode=%s)",
         config.dns_host,
         config.dns_port,
         config.block_mode,
     )
+
+    # ── Event-loop lag monitor (perf-latency): sleep(0.1) drift, /health max ─
+    loop_lag = LoopLagMonitor()
+    lag_stop = asyncio.Event()
+    lag_task = asyncio.create_task(loop_lag.run(lag_stop), name="loop-lag")
 
     # ── REST API (same event loop) ──────────────────────────────────────────
     state = ApiState(
@@ -182,7 +242,12 @@ async def _run(config: Config) -> None:
             limit=config.auth_failure_limit,
             window=config.auth_failure_window,
         ),
+        # Browser-extension report rate limit: bursts up to 60 reports,
+        # sustained 2/s per client IP
+        report_limiter=RateLimiter(rate_rps=2.0, burst=60.0),
         allowed_local_dirs=allowed_dirs,
+        dns_probe=dns_probe,
+        loop_lag=loop_lag,
     )
     app = create_app(state)
     access_log = logging.getLogger("reqko.access") if logger.isEnabledFor(logging.DEBUG) else None
@@ -244,11 +309,23 @@ async def _run(config: Config) -> None:
     logger.info("Shutting down...")
     await runner.cleanup()
     await metrics_runner.cleanup()
-    udp_transport.close()
-    tcp_server.close()
-    await tcp_server.wait_closed()
+    if dns_handles.udp.transport is not None:
+        dns_handles.udp.transport.close()
+    dns_handles.tcp.close()
+    await dns_handles.tcp.wait_closed()
 
     # Flush the accepted query events before closing the DB
+    lag_stop.set()
+    await lag_task
+    watchdog_stop.set()
+    if watchdog_task is not None:
+        await watchdog_task
+    suggest_stop.set()
+    if suggest_task is not None:
+        await suggest_task
+    refresh_stop.set()
+    if refresh_task is not None:
+        await refresh_task
     await writer.stop()
     await writer_task
     await retention.stop()
@@ -262,6 +339,14 @@ async def _run(config: Config) -> None:
 
 def main() -> int:
     """Run the reqko server."""
+    if sys.platform == "win32":
+        # Windows: the default ProactorEventLoop permanently stops reading
+        # from a UDP socket after an ICMP port-unreachable (WinError 10054,
+        # ConnectionResetError) — the read loop is never re-armed. The
+        # selector loop re-arms reads after error_received(), so UDP keeps
+        # serving. Combined with SIO_UDP_CONNRESET=False (dns/server.py).
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
     try:
         config = Config.from_env()
     except ConfigError as err:
