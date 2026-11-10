@@ -126,6 +126,7 @@ flowchart LR
 | Trivy `prom/prometheus:v3.15.1` | ✅ RUN | **0 HIGH/CRITICAL** (distroless: только gobinary-таргеты, чистые) |
 | Trivy `grafana/grafana:13.3.0` | ✅ RUN | alpine 3.24.3: 0 OS-CVE; **5 HIGH, 0 CRITICAL** в library-таргетах (Go/node зависимости, часть с available fix) |
 | Trivy `ph-reqko:0.1.0` (повторно) | ✅ RUN | 41 (39 HIGH/2 CRIT) — без изменений, все unfixed upstream |
+| Trivy `ph-reqko:ci` (цель 8, обновлённый образ) | ✅ RUN | **0 HIGH/CRITICAL, exit 0** при политике CI (`--severity HIGH,CRITICAL --ignore-unfixed`); происхождение и разрешение единственной находки (pip-SBOM, setuptools 70.3.0) — `docs/evidence/08-trivy-origin.txt`, `docs/08-testing-and-conclusions.md` §3.3 |
 | Регрессия Цели 6: health через прокси, 401, DNS на 53 | ✅ RUN | health ok (77760 правил), 401 без токена, 10/10 DNS-запросов (6 blocked) |
 | Рендер Grafana UI глазами | ❌ NOT VERIFIED | визуальная проверка в браузере за пользователем |
 | CI на GitHub | ❌ NOT RUN | пуш запрещён правилами; workflow валидирован actionlint локально |
@@ -138,6 +139,7 @@ flowchart LR
 | 1 | Prometheus v3 не принимает `--flag=false` (`Error parsing command line arguments: unexpected false`), контейнер циклически рестартовал | логи prometheus; бисекция `docker run prom/prometheus:v3.15.1 --web.enable-admin-api=false` | флаги убраны: в v3 admin API/lifecycle выключены по умолчанию (`--[no-]` форма в help); тест изменён на запрет обоих флагов |
 | 2 | `REQKO_METRICS_HOST` не был задан в compose → сайт метрик слушал 127.0.0.1 внутри контейнера → Prometheus target DOWN (`connect: connection refused`) | `up{job="reqko"} = 0` / lastError в `/api/v1/targets` | compose: `REQKO_METRICS_HOST: 0.0.0.0` + тест `test_metrics_not_published_by_reqko` проверяет и bind, и отсутствие публикации |
 | 3 | Свежий том `/data` без blocklist (известное ограничение Цели 6) подтверждено снова | логи reqko первого старта | документировано в README (создать файл в томе + POST update) |
+| 4 | `pip >= 26` поставляет `pip/_vendor/bom.cdx.json` — CycloneDX-SBOM своих build-time зависимостей (`setuptools==70.3.0`); Trivy-анализатор SBOM принимает её за установленный пакет → CI-скан падал на CVE-2025-47273, которого в ФС образа нет | извлечение слоя 8 (`docker save`), grep по литералу `70.3.0`: только `bom.cdx.json` и `vendor.txt`; `pip/_vendor` не содержит setuptools-кода (705 записей); установленный setuptools — 84.2.1 | runtime-стадия удаляет `bom.cdx.json` (pip его не читает); rescan: **0 findings, exit 0**; evidence `08-trivy-origin.txt` |
 
 ## 8. Соответствие требованиям
 

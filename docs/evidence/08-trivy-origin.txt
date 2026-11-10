@@ -1,0 +1,42 @@
+=== objective-8 v2: Trivy 'setuptools 70.3.0' — exact origin and resolution (2026-11-11) ===
+
+== 1. reproduction (CI-identical) ==
+docker buildx build --load -t ph-reqko:ci .   # same Dockerfile as .github/workflows/ci.yml
+trivy image --severity HIGH,CRITICAL --ignore-unfixed --format json ph-reqko:ci
+-> Target 'Python' (lang-pkgs, python-pkg): CVE-2025-47273 setuptools 70.3.0 (fixed 78.1.1),
+   PkgPath=None, LayerDiffID=sha256:8e71541b849dd2b05d799d468f7eda198cf723cffc517686fbd166b42657aada
+
+== 2. layer forensics ==
+Layer 8 of 9 = the RUN layer 'pip install wheel && upgrade pip/setuptools && uninstall wheel'.
+Extracted the layer tar (docker save -> manifest.json -> blobs/sha256/9da744e7..., gunzip,
+sha256 == 8e71541b...): it contains setuptools-84.2.1.dist-info + a whiteout for the base's
+setuptools-65.5.1.dist-info. NO file anywhere in the layer carries version 70.3.0.
+
+== 3. root cause: pip's own CycloneDX SBOM ==
+grep of the layer for the literal '70.3.0' finds exactly two files:
+  usr/local/lib/python3.11/site-packages/pip/_vendor/bom.cdx.json
+      -> 'pkg:pypi/setuptools@70.3.0' (pip 26.3's CycloneDX SBOM of its BUILD-time deps)
+  usr/local/lib/python3.11/site-packages/pip/_vendor/vendor.txt
+      -> 'setuptools==70.3.0' (plain-text list of the same)
+pip 26.3 does NOT vendor setuptools code: pip/_vendor contains 705 entries, none named
+setuptools. The installed setuptools is 84.2.1 (>= fix 78.1.1). Trivy's SBOM analyzer parses
+the third-party bom.cdx.json and reports its build-time 'setuptools 70.3.0' component as an
+installed package — exactly what Trivy's own log hints at ('Third-party SBOM may lead to
+inaccurate vulnerability detection'). The finding was introduced by the previous remediation
+(upgrading pip to 26.3, which began shipping this SBOM file).
+
+== 4. resolution (real fix, no .trivyignore) ==
+The runtime stage now removes the inaccurate record in the same layer:
+  rm -f /usr/local/lib/python3.11/site-packages/pip/_vendor/bom.cdx.json
+The file is pip-internal documentation, never read at runtime; the image's real setuptools
+is 84.2.1. Result: trivy exits 0 with the CI policy UNCHANGED
+(--severity HIGH,CRITICAL --ignore-unfixed):
+
+== 5. final scan output ==
+Target 'ph-reqko:ci (debian 12.15)' (os-pkgs): 0 findings
+Target 'Python' (lang-pkgs): 0 findings
+TOTAL: 0 findings; exit code 0
+
+== 6. post-fix image smoke ==
+pip 26.3 works (pip --version / pip list), bom.cdx.json absent, setuptools 84.2.1,
+uid=10001(reqko); container run: /health -> 200 (with REQKO_API_HOST=0.0.0.0 for the port publish)
