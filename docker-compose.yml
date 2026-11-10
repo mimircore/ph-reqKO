@@ -1,0 +1,206 @@
+name: ph-reqko
+
+services:
+  reqko:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ph-reqko:0.1.0
+    restart: unless-stopped
+    # Immutable container: state lives only in the reqko-data volume
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 2.0
+    environment:
+      # Compose refuses to start without explicit tokens (:? syntax)
+      REQKO_ADMIN_TOKEN: ${REQKO_ADMIN_TOKEN:?Set REQKO_ADMIN_TOKEN in .env (copy .env.example)}
+      REQKO_READ_TOKEN: ${REQKO_READ_TOKEN:?Set REQKO_READ_TOKEN in .env (copy .env.example)}
+      # Listen on 53 directly: the sysctl below allows binding privileged
+      # ports without root and without CAP_NET_BIND_SERVICE
+      REQKO_DNS_HOST: 0.0.0.0
+      REQKO_DNS_PORT: "53"
+      # API reachable only inside the compose network (via the proxy);
+      # deliberately NOT published to the host
+      REQKO_API_HOST: 0.0.0.0
+      REQKO_API_PORT: "8080"
+      # Metrics endpoint: bind all interfaces inside the container so
+      # Prometheus (backend network) can scrape; NOT published to the host.
+      # The app ACL (REQKO_ALLOWED_NETWORKS) guards who may scrape.
+      REQKO_METRICS_HOST: 0.0.0.0
+      REQKO_METRICS_PORT: "9100"
+      # Keep the DNS ACL on: the default is private ranges only
+      REQKO_ALLOWED_NETWORKS: ${REQKO_ALLOWED_NETWORKS:-127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1/128,fe80::/10}
+      REQKO_RATE_LIMIT_RPS: ${REQKO_RATE_LIMIT_RPS:-100}
+      REQKO_LOG_CLIENT_IP: ${REQKO_LOG_CLIENT_IP:-anonymized}
+      REQKO_LOG_RETENTION_DAYS: ${REQKO_LOG_RETENTION_DAYS:-7}
+      REQKO_LOG_LEVEL: ${REQKO_LOG_LEVEL:-INFO}
+      REQKO_UPSTREAM_DNS: ${REQKO_UPSTREAM_DNS:-9.9.9.9:53,149.112.112.112:53}
+      REQKO_BLOCKLIST_FILES: /data/blocklist.txt
+      REQKO_BLOCKLIST_URLS: ${REQKO_BLOCKLIST_URLS:-}
+    volumes:
+      - reqko-data:/data
+    sysctls:
+      # Bind port 53 as UID 10001 without any capabilities
+      net.ipv4.ip_unprivileged_port_start: 0
+    ports:
+      # Default bind is localhost only; publishing 0.0.0.0:53 to the internet
+      # makes the resolver open to everyone - keep the ACL and rate limit on
+      # (see docs/06-remote-access.md)
+      - "${REQKO_DNS_BIND:-127.0.0.1}:53:53/udp"
+      - "${REQKO_DNS_BIND:-127.0.0.1}:53:53/tcp"
+    networks:
+      backend:
+        # Fixed address: VPN clients use 172.28.0.10 as their DNS server
+        # (routed through the WireGuard tunnel on the backend network)
+        ipv4_address: 172.28.0.10
+      upstream:
+
+  proxy:
+    build:
+      context: ./docker/caddy
+      dockerfile: Dockerfile
+    image: ph-reqko-caddy:0.1.0
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+      # Writable storage for the Caddy internal CA and config state
+      - /data/caddy:size=64m,mode=700
+      - /config:size=16m,mode=700
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - reqko
+    environment:
+      XDG_DATA_HOME: /data/caddy
+      XDG_CONFIG_HOME: /config
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+    ports:
+      # Caddy listens on unprivileged 8443 inside the container (its binary
+      # runs with cap_drop ALL); the host still sees 443
+      - "${REQKO_HTTPS_BIND:-127.0.0.1}:443:8443"
+    networks:
+      - backend
+      # Publishing ports requires a non-internal network (internal networks
+      # cannot publish); `edge` carries only the published 443
+      - edge
+
+  # Optional secure-remote-access path (VPN-only DNS + panel):
+  #   docker compose --profile vpn up -d
+  # Nothing else is exposed publicly; see docs/06-remote-access.md.
+  wireguard:
+    image: linuxserver/wireguard:1.0.20260223
+    profiles:
+      - vpn
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ./docker/wireguard:/config
+    ports:
+      - "${REQKO_WG_BIND:-127.0.0.1}:51820:51820/udp"
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+    networks:
+      - backend
+      - edge
+
+  # ── Observability (NFR-07) ──────────────────────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:v3.15.1
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
+      # NOTE: --web.enable-admin-api / --web.enable-lifecycle are NOT set:
+      # they default to off in Prometheus v3, and the v3 flag parser rejects
+      # the --flag=false syntax ("unexpected false")
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      # backend only: scrapes reqko:9100 over the internal network and is
+      # deliberately NOT published to the host
+      - backend
+
+  grafana:
+    image: grafana/grafana:13.3.0
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1.0
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD in .env (copy .env.example)}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: "false"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      # Published only on loopback by default (see GRAFANA_BIND/GRAFANA_PORT
+      # in .env.example); edge is non-internal, so Grafana technically has
+      # egress - an accepted residual exposure for the dashboard host port.
+      - "${GRAFANA_BIND:-127.0.0.1}:${GRAFANA_PORT:-3000}:3000"
+    networks:
+      - backend
+      - edge
+    depends_on:
+      - prometheus
+
+networks:
+  # internal: true -> no direct internet access; proxy <-> reqko only
+  backend:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+  # reqko also needs egress for upstream DNS and blocklist URL refresh
+  upstream: {}
+  # non-internal network for published ports (443, 51820/udp, 3000)
+  edge: {}
+
+volumes:
+  reqko-data:
+  prometheus-data:
+  grafana-data:

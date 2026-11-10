@@ -224,6 +224,7 @@ __marimo__/
 *.db-shm
 *.db-wal
 blocklist.txt
+docker/wireguard/
 *.sqlite3
 .idea/
 .vscode/

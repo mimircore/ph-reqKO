@@ -39,7 +39,7 @@ class RuleManager:
         self._version = engine.snapshot.version
         self.last_update: str | None = None
         # Optional callback invoked with the new rule count after every
-        # snapshot swap (e.g. to update a metrics gauge).
+        # snapshot swap (used to update the dns_active_rules_count gauge).
         self.on_rules_changed: Callable[[int], None] | None = None
 
     # ── startup / persistence ─────────────────────────────────────────────────
@@ -105,7 +105,7 @@ class RuleManager:
         if self.on_rules_changed is not None:
             try:
                 self.on_rules_changed(snapshot.rules_count)
-            except Exception:  # pragma: no cover - callbacks must never break rules
+            except Exception:  # pragma: no cover - metrics must never break rules
                 logger.debug("on_rules_changed callback failed", exc_info=True)
         logger.info(
             "Filter rules v%d: %d rules (%d base + %d custom)",

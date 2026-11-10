@@ -12,6 +12,7 @@ import asyncio
 import logging
 import struct
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from reqko.dns.acl import ClientACL
@@ -40,6 +41,7 @@ from reqko.dns.upstream import (
     query_upstream,
 )
 from reqko.filtering.engine import FilterEngine
+from reqko.metrics.exporter import MetricsRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +95,9 @@ class PipelineConfig:
     log_queue_drop_counter: list[int] | None = None  # [0] = mutable int
     # Circuit breaker state shared across queries (single-loop concurrency)
     upstream_health: UpstreamHealth = field(default_factory=UpstreamHealth)
+    # Optional Prometheus registry (NFR-07). Updates are O(1) and must
+    # never affect resolving (NFR-03) - see _record below.
+    metrics: MetricsRegistry | None = None
 
 
 def _qtype_name(qtype: int) -> str:
@@ -146,6 +151,7 @@ async def process_query(
     raw_data: bytes,
     client_ip: str,
     cfg: PipelineConfig,
+    protocol: str = "udp",
 ) -> bytes:
     """Processes a raw DNS packet through the full pipeline.
 
@@ -196,6 +202,7 @@ async def process_query(
         except asyncio.QueueFull:
             if cfg.log_queue_drop_counter is not None:
                 cfg.log_queue_drop_counter[0] += 1
+            _record(lambda m: m.inc_dropped_logs())
             logger.warning("Log queue full, dropping event for %s", client_ip)
 
     def _respond(pkt: DNSPacket) -> bytes:
@@ -205,6 +212,18 @@ async def process_query(
             logger.error("Failed to serialize response: %s: %s", type(e).__name__, e)
             return b""
 
+    metrics = cfg.metrics  # MetricsRegistry | None (read once per query)
+
+    def _record(metric_fn: Callable[[MetricsRegistry], None]) -> None:
+        """Updates a metric, swallowing anything: metrics never affect
+        resolving (NFR-03). O(1) in-memory calls only, no I/O."""
+        if metrics is None:
+            return
+        try:
+            metric_fn(metrics)
+        except Exception:  # pragma: no cover - defensive by design
+            logger.debug("metrics update failed", exc_info=True)
+
     def _blocked(
         request: DNSPacket,
         matched_rule: str | None,
@@ -212,6 +231,8 @@ async def process_query(
         upstream: str | None = None,
     ) -> bytes:
         """Builds, logs and serializes a blocking response (FR-08)."""
+        _record(lambda m: m.inc_blocked("blacklist" if status == "BLOCKED_BLACKLIST" else "cname"))
+        _record(lambda m: m.observe_duration("blocked", time.perf_counter() - start_time))
         block_resp = make_blocking_response(
             request,
             block_mode=cfg.block_mode,
@@ -288,8 +309,12 @@ async def process_query(
     # ── Step 3.5: UDP self-probe (watchdog liveness, never logged) ────────────
     # Any reply at all proves the UDP path is alive; REFUSED is synthetic and
     # the event is intentionally not dispatched (no query_log/stats noise).
+    # Returns before the metric below: self-probes stay invisible to metrics.
     if qname == SELF_PROBE_NAME:
         return _respond(make_response(request, rcode=RCODE_REFUSED))
+
+    # Metric: total parsed queries by protocol and qtype (NFR-07)
+    _record(lambda m: m.inc_dns_queries(protocol, _qtype_name(qtype)))
 
     # ── Step 4: ANY Check ─────────────────────────────────────────────────────
     if qtype == TYPE_ANY:
@@ -322,11 +347,14 @@ async def process_query(
                     return _blocked(request, cname_result.matched_rule, "BLOCKED_CNAME")
 
         # Serve from cache
+        _record(lambda m: m.inc_cache_hit())
+        _record(lambda m: m.observe_duration("cache", time.perf_counter() - start_time))
         cached_resp = cfg.cache.build_response(request, cache_entry)
         _dispatch(_make_event(cached_resp, "CACHED"))
         return _respond(cached_resp)
 
     # ── Step 8: Upstream Query (raced, breaker-guarded) ───────────────────────
+    _record(lambda m: m.inc_cache_miss())
     try:
         upstream_result = await query_upstream(
             request,
@@ -335,6 +363,7 @@ async def process_query(
             health=cfg.upstream_health,
         )
     except UpstreamError as e:
+        _record(lambda m: m.observe_duration("error", time.perf_counter() - start_time))
         # Serve-stale (RFC 8767): an expired cache entry beats SERVFAIL when
         # every upstream is down. The stale answer gets a short TTL so the
         # client re-asks soon, and is logged as CACHED (it came from cache).
@@ -393,6 +422,7 @@ async def process_query(
         _clamp_response_ttls(upstream_resp, entry.ttl)
 
     # ── Step 11: Respond ──────────────────────────────────────────────────────
+    _record(lambda m: m.observe_duration("upstream", time.perf_counter() - start_time))
     status = "ALLOWED" if is_whitelisted else "FORWARDED"
     _dispatch(_make_event(upstream_resp, status, upstream=upstream_used))
     return _respond(upstream_resp)

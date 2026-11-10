@@ -1,0 +1,13 @@
+# Prometheus configuration for the ph-reqKO compose stack (NFR-07).
+# Scrapes the resolver's metrics endpoint over the internal backend network.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: reqko
+    metrics_path: /metrics
+    static_configs:
+      # Service name resolves via the backend docker network;
+      # the app ACL (REQKO_ALLOWED_NETWORKS) must accept the backend subnet.
+      - targets: ["reqko:9100"]

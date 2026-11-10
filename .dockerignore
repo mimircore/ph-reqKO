@@ -1,0 +1,34 @@
+# Never bake secrets or local artifacts into the image
+.env
+.env.*
+!.env.example
+blocklist.txt
+reqko.db
+reqko.db-shm
+reqko.db-wal
+
+# Version control and IDE
+.git
+.gitignore
+.vs
+.vscode
+.idea
+
+# Local development
+.venv
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# Not needed inside the image
+tests
+scripts
+docs
+docker
+docker-compose.yml
+.claude

@@ -1,0 +1,14 @@
+# Grafana dashboard provisioning: load everything from /var/lib/grafana/dashboards
+# (the read-only bind mount of docker/grafana/dashboards).
+apiVersion: 1
+
+providers:
+  - name: ph-reqko
+    orgId: 1
+    folder: ph-reqKO
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
