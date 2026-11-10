@@ -40,8 +40,12 @@ RUN apt-get update \
  && chown -R 10001:10001 /data
 
 COPY --from=builder /dist/ /tmp/dist/
+# Upgrade pip and setuptools to patched versions: the base image bundles an
+# older setuptools (CVE-2025-47273, fixed in 78.1.1) and Trivy scans every
+# layer, so an uninstall in a later layer would not silence it.
 RUN pip install --no-cache-dir /tmp/dist/*.whl \
- && pip uninstall --no-cache-dir -y setuptools wheel \
+ && python -m pip install --no-cache-dir --upgrade "pip>=25.3" "setuptools>=78.1.1" \
+ && pip uninstall --no-cache-dir -y wheel \
  && rm -rf /tmp/dist
 
 VOLUME ["/data"]
