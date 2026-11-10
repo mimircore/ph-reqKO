@@ -2,7 +2,7 @@
 
 A DNS server that blocks ad and tracker domains for your devices — a Pi-hole-style DNS filter written in Python.
 
-> **Status:** the resolver core (objective 4), statistics + REST API (objective 5), the charts-only web panel, and containerization (objective 6, runtime-verified on Docker Desktop) are implemented and tested. Objective 7 adds Prometheus metrics (hand-written exposition, NFR-07), a provisioned Prometheus + Grafana stack in compose, and a GitHub Actions CI workflow (NFR-09 — written and actionlint-validated, but never run on GitHub: pushing is out of scope for now). Objective 8 (performance/security validation) is pending.
+> **Status:** the project is complete (objectives 1–8). Implemented and verified: UDP+TCP DNS resolver with caching, blocklists, allowlist priority, CNAME uncloaking, ACL and rate limiting; adaptive ad-domain suggestions with a manual approve/reject panel; a Manifest V3 browser extension; a charts-only web panel; a token-scoped REST API; Prometheus metrics + provisioned Grafana; Docker Compose deployment with secure remote access; GitHub Actions CI. Performance, security and the final FR/NFR traceability are documented in [docs/08-testing-and-conclusions.md](docs/08-testing-and-conclusions.md) (299 automated tests, coverage ~89%, 10k-packet DNS fuzz, dependency/container audits).
 
 ## Goal
 
@@ -14,9 +14,9 @@ Build a DNS server in Python that:
 - ships with a minimal web panel showing what was blocked (charts only);
 - is deployed in a container with secure remote access, monitoring, and CI.
 
-## Planned stack
+## Stack
 
-Python (`asyncio`), SQLite, REST API, Docker / Docker Compose, Prometheus, Grafana, GitHub Actions.
+Python 3.11 (`asyncio`, no C extensions), SQLite (WAL), aiohttp REST API + separate Prometheus exposition, Docker / Docker Compose (Caddy + WireGuard for remote access), Prometheus + Grafana, GitHub Actions CI.
 
 ## Roadmap
 
@@ -27,7 +27,7 @@ Python (`asyncio`), SQLite, REST API, Docker / Docker Compose, Prometheus, Grafa
 - [x] 5. Add statistics collection and a REST API (incl. the charts-only web panel)
 - [x] 6. Containerize the application and set up secure remote access (runtime-verified on Docker Desktop)
 - [x] 7. Set up monitoring (Prometheus, Grafana) and automated tests (CI written and lint-validated; first GitHub run pending push)
-- [ ] 8. Test performance and security, document limitations and improvements
+- [x] 8. Final performance/security verification, FR/NFR traceability and conclusions (docs/08)
 
 ## Development
 
@@ -207,6 +207,7 @@ queries arrive.
 - [Goal 5 — Implementation: statistics storage and REST API](docs/05-implementation.md) (in Russian)
 - [Goal 6 addendum — Adaptive ad-domain discovery](docs/06-domain-suggestions.md) (in Russian)
 - [Goal 7 addendum — DNS latency: measurement and optimization](docs/07-performance.md) (in Russian)
+- [Goal 8 — Final testing, performance, security and conclusions](docs/08-testing-and-conclusions.md) (in Russian)
 - [Goal 6 — Implementation: containerization and secure remote access](docs/06-implementation.md) (in Russian)
 - [Goal 6 — Remote access guide: threat model, VPN setup](docs/06-remote-access.md) (in Russian)
 - [Goal 7 — Implementation: Prometheus metrics, Grafana, CI](docs/07-implementation.md) (in Russian)

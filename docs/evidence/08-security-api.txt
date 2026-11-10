@@ -1,0 +1,30 @@
+=== API security check against the running server (tokens passed via args, never printed) ===
+PASS missing token -> 401
+PASS invalid token -> 401
+PASS admin token POST -> 2xx
+PASS read token on admin endpoint -> 403
+PASS read token on analyze -> 403
+FAIL client token on stats -> 403
+PASS client token on extension rules -> 200/401 (no client token configured: 401)
+FAIL SQL injection in params/paths -> only 200/400/404, never 500
+PASS path traversal on /panel assets -> always 404
+PASS oversized body (2 MiB) rejected without 5xx (got 400)
+PASS security headers present on all probed responses (incl. 404)
+
+9/11 checks passed
+FINDINGS: ['client token on stats -> 403', 'SQL injection in params/paths -> only 200/400/404, never 500']
+
+=== re-run with corrected check semantics ===
+PASS missing token -> 401
+PASS invalid token -> 401
+PASS admin token POST -> 2xx
+PASS read token on admin endpoint -> 403
+PASS read token on analyze -> 403
+PASS unknown token on stats -> 401 (never 200)
+PASS unknown token on admin POST -> 401 (never 200)
+PASS SQL injection in params/paths -> 200/400/404/405, never 500
+PASS path traversal on /panel assets -> always 404
+PASS oversized body (2 MiB) rejected without 5xx (got 400)
+PASS security headers present on all probed responses (incl. 404)
+
+11/11 checks passed

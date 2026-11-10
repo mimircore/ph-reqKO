@@ -40,9 +40,20 @@ RUN apt-get update \
  && chown -R 10001:10001 /data
 
 COPY --from=builder /dist/ /tmp/dist/
+# Upgrade pip and setuptools to patched versions: the base image bundles an
+# older setuptools (CVE-2025-47273, fixed in 78.1.1) and Trivy scans every
+# layer, so an uninstall in a later layer would not silence it.
+# pip >= 26 ships pip/_vendor/bom.cdx.json — a CycloneDX SBOM of pip's
+# BUILD-time dependencies, declaring setuptools==70.3.0. No such package is
+# installed (pip 26.3 does not vendor setuptools code; the installed
+# setuptools is 84.2.1), but Trivy's SBOM analyzer reports it as an installed
+# package and fails the CI scan. The file is never read at runtime, so it is
+# removed here — the inaccurate record does not exist in the final image.
 RUN pip install --no-cache-dir /tmp/dist/*.whl \
- && pip uninstall --no-cache-dir -y setuptools wheel \
- && rm -rf /tmp/dist
+ && python -m pip install --no-cache-dir --upgrade "pip>=25.3" "setuptools>=78.1.1" \
+ && pip uninstall --no-cache-dir -y wheel \
+ && rm -rf /tmp/dist \
+ && rm -f /usr/local/lib/python3.11/site-packages/pip/_vendor/bom.cdx.json
 
 VOLUME ["/data"]
 

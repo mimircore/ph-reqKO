@@ -1,0 +1,15 @@
+=== DNS fuzz: 10000 random/mutated/pointer-attack packets, server must never crash or hang ===
+server: PID 17500, 78k rules, UDP 15353; liveness probe after every 500 packets + final health check
+(a first attempt was aborted at ~1000 packets: the client drain loop used a blocking 2 s recv — client-side issue, fixed to non-blocking; server stayed up throughout)
+{
+  "sent": 10000,
+  "client_received_replies": 9991,
+  "client_timeouts": 9,
+  "wall_seconds": 0.94,
+  "post_fuzz_probe_ok": true,
+  "post_fuzz_probe_ms": 5.16,
+  "max_batch_probe_ms": 11.59,
+  "health_ok_after": true,
+  "count": 10000
+}
+FUZZ VERDICT: SERVER SURVIVED

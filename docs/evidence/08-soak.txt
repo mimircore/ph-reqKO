@@ -1,0 +1,17 @@
+=== 10-minute soak (v2) — memory sampled via PROCESS_MEMORY_COUNTERS_EX on the REAL server PID ===
+CORRECTION: the v1 soak file measured the .venv python.exe redirector stub (4.68 MiB), not the
+server; the v2 run targets PID 10176 (netstat-verified owner of the DNS/API ports). Full
+per-sample output with private_usage/peak_working_set/working_set: see 08-rss.txt (point 3).
+
+v2 soak summary (server PID 10176, 78216 rules, 20 qps mixed load, 600 s, samples every 10 s):
+  queries=8909, errors=0
+  SOAK TREND private_usage: 55.33 -> 56.50 MiB (delta +1.16 MiB)
+  SOAK TREND working_set:   68.02 -> 67.63 MiB (delta -0.39 MiB)
+  snapshot right after:     private_usage 56.52 MiB, working_set 67.52 MiB, peak_ws 70.07 MiB
+
+=== superseded v1 output (stub-based, kept for honesty) ===
+
+-- v1 soak tail (stub): --
+t=  580.0s RSS=    4.76 MiB queries=9215 errors=0
+t=  590.0s RSS=    4.74 MiB queries=9375 errors=0
+SOAK TREND: first-quarter avg RSS=4.68 MiB, last-quarter avg RSS=4.75 MiB, delta=+0.07 MiB over 600s, total queries=9535, errors=0

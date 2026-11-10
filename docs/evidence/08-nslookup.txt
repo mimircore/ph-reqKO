@@ -1,0 +1,15 @@
+=== NFR-10: native Windows client (nslookup) against the running resolver ===
+Server:  UnKnown
+Address:  127.0.0.1
+
+Name:    doubleclick.net
+Addresses:  ::
+	  0.0.0.0
+
+
+Address:  127.0.0.1
+
+Name:    wikipedia.org
+Addresses:  2a02:ec80:300:ed1a::1
+	  185.15.59.224
+

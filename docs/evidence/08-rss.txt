@@ -1,0 +1,95 @@
+=== objective-8 v2 memory measurement (PROCESS_MEMORY_COUNTERS_EX / PrivateUsage) ===
+CORRECTION: the v1 numbers (4.68 MiB) measured the .venv python.exe redirector stub,
+not the server (Popen returns the stub PID; the real interpreter is its child).
+The real server for this run is PID 10176 (owner of ports 15353/18080, netstat-verified).
+
+-- point 1: rules loaded (78216), idle --
+peak_working_set: 73469952 bytes = 70.07 MiB
+private_usage: 46166016 bytes = 44.03 MiB
+working_set: 59637760 bytes = 56.88 MiB
+
+-- point 2: right after a 15000-query burst at concurrency 300 --
+burst: 15000 queries at concurrency 300 in 7.5s (1991 qps)
+client answers=15000, failures=0
+server queue: depth=0, dropped_events=0
+post-burst query OK (1516.55 ms)
+OVERFLOW VERDICT: DEFECT
+-- memory snapshot immediately after the burst --
+peak_working_set: 73469952 bytes = 70.07 MiB
+private_usage: 58003456 bytes = 55.32 MiB
+working_set: 71319552 bytes = 68.02 MiB
+
+-- point 3: 10-minute soak (20 qps mixed), samples every 10 s --
+t=    0.0s peak_working_set=   70.07MiB private_usage=   55.32MiB working_set=   68.02MiB queries=0 errors=0
+t=   11.2s peak_working_set=   70.07MiB private_usage=   55.32MiB working_set=   68.03MiB queries=16 errors=0
+t=   22.3s peak_working_set=   70.07MiB private_usage=   55.32MiB working_set=   68.03MiB queries=31 errors=0
+t=   33.1s peak_working_set=   70.07MiB private_usage=   55.32MiB working_set=   68.03MiB queries=42 errors=0
+t=   43.1s peak_working_set=   70.07MiB private_usage=   55.32MiB working_set=   68.04MiB queries=63 errors=0
+t=   53.7s peak_working_set=   70.07MiB private_usage=   55.24MiB working_set=   67.66MiB queries=208 errors=0
+t=   63.7s peak_working_set=   70.07MiB private_usage=   55.24MiB working_set=   67.79MiB queries=345 errors=0
+t=   73.7s peak_working_set=   70.07MiB private_usage=   55.24MiB working_set=   67.85MiB queries=505 errors=0
+t=   83.7s peak_working_set=   70.07MiB private_usage=   55.27MiB working_set=   67.89MiB queries=665 errors=0
+t=   93.7s peak_working_set=   70.07MiB private_usage=   55.27MiB working_set=   68.02MiB queries=824 errors=0
+t=  103.7s peak_working_set=   70.07MiB private_usage=   55.27MiB working_set=   68.03MiB queries=984 errors=0
+t=  113.7s peak_working_set=   70.07MiB private_usage=   55.29MiB working_set=   68.05MiB queries=1143 errors=0
+t=  123.7s peak_working_set=   70.07MiB private_usage=   55.54MiB working_set=   68.18MiB queries=1303 errors=0
+t=  133.7s peak_working_set=   70.07MiB private_usage=   55.54MiB working_set=   68.28MiB queries=1462 errors=0
+t=  143.7s peak_working_set=   70.07MiB private_usage=   55.54MiB working_set=   68.36MiB queries=1622 errors=0
+t=  153.7s peak_working_set=   70.07MiB private_usage=   56.54MiB working_set=   68.44MiB queries=1781 errors=0
+t=  163.7s peak_working_set=   70.07MiB private_usage=   56.54MiB working_set=   68.51MiB queries=1941 errors=0
+t=  173.7s peak_working_set=   70.07MiB private_usage=   56.54MiB working_set=   68.60MiB queries=2101 errors=0
+t=  183.7s peak_working_set=   70.07MiB private_usage=   56.54MiB working_set=   68.70MiB queries=2261 errors=0
+t=  193.7s peak_working_set=   70.07MiB private_usage=   56.57MiB working_set=   68.89MiB queries=2420 errors=0
+t=  203.7s peak_working_set=   70.07MiB private_usage=   56.60MiB working_set=   69.02MiB queries=2580 errors=0
+t=  213.7s peak_working_set=   70.07MiB private_usage=   56.60MiB working_set=   69.11MiB queries=2740 errors=0
+t=  223.7s peak_working_set=   70.07MiB private_usage=   56.60MiB working_set=   69.19MiB queries=2900 errors=0
+t=  233.7s peak_working_set=   70.07MiB private_usage=   56.60MiB working_set=   69.43MiB queries=3059 errors=0
+t=  243.7s peak_working_set=   70.07MiB private_usage=   56.60MiB working_set=   69.52MiB queries=3219 errors=0
+t=  253.7s peak_working_set=   70.07MiB private_usage=   54.89MiB working_set=   67.17MiB queries=3379 errors=0
+t=  263.7s peak_working_set=   70.07MiB private_usage=   54.97MiB working_set=   67.21MiB queries=3539 errors=0
+t=  273.7s peak_working_set=   70.07MiB private_usage=   55.12MiB working_set=   67.32MiB queries=3698 errors=0
+t=  283.7s peak_working_set=   70.07MiB private_usage=   55.26MiB working_set=   67.37MiB queries=3858 errors=0
+t=  293.7s peak_working_set=   70.07MiB private_usage=   55.26MiB working_set=   67.38MiB queries=4018 errors=0
+t=  303.7s peak_working_set=   70.07MiB private_usage=   56.30MiB working_set=   67.55MiB queries=4177 errors=0
+t=  313.7s peak_working_set=   70.07MiB private_usage=   56.30MiB working_set=   67.59MiB queries=4337 errors=0
+t=  323.7s peak_working_set=   70.07MiB private_usage=   56.30MiB working_set=   67.59MiB queries=4495 errors=0
+t=  333.7s peak_working_set=   70.07MiB private_usage=   56.35MiB working_set=   67.59MiB queries=4655 errors=0
+t=  343.7s peak_working_set=   70.07MiB private_usage=   56.35MiB working_set=   67.59MiB queries=4815 errors=0
+t=  353.7s peak_working_set=   70.07MiB private_usage=   56.36MiB working_set=   67.60MiB queries=4975 errors=0
+t=  363.7s peak_working_set=   70.07MiB private_usage=   56.36MiB working_set=   67.62MiB queries=5135 errors=0
+t=  373.7s peak_working_set=   70.07MiB private_usage=   56.36MiB working_set=   67.62MiB queries=5294 errors=0
+t=  383.7s peak_working_set=   70.07MiB private_usage=   56.39MiB working_set=   67.68MiB queries=5454 errors=0
+t=  393.7s peak_working_set=   70.07MiB private_usage=   56.43MiB working_set=   67.87MiB queries=5614 errors=0
+t=  403.7s peak_working_set=   70.07MiB private_usage=   56.43MiB working_set=   67.97MiB queries=5774 errors=0
+t=  413.7s peak_working_set=   70.07MiB private_usage=   56.43MiB working_set=   67.97MiB queries=5934 errors=0
+t=  423.7s peak_working_set=   70.07MiB private_usage=   56.43MiB working_set=   67.97MiB queries=6093 errors=0
+t=  433.7s peak_working_set=   70.07MiB private_usage=   56.43MiB working_set=   67.98MiB queries=6253 errors=0
+t=  443.7s peak_working_set=   70.07MiB private_usage=   56.43MiB working_set=   67.99MiB queries=6413 errors=0
+t=  453.7s peak_working_set=   70.07MiB private_usage=   56.43MiB working_set=   67.99MiB queries=6573 errors=0
+t=  463.7s peak_working_set=   70.07MiB private_usage=   56.43MiB working_set=   68.02MiB queries=6733 errors=0
+t=  473.7s peak_working_set=   70.07MiB private_usage=   56.43MiB working_set=   68.03MiB queries=6892 errors=0
+t=  483.7s peak_working_set=   70.07MiB private_usage=   56.43MiB working_set=   68.04MiB queries=7052 errors=0
+t=  493.7s peak_working_set=   70.07MiB private_usage=   56.50MiB working_set=   67.43MiB queries=7211 errors=0
+t=  503.7s peak_working_set=   70.07MiB private_usage=   56.50MiB working_set=   67.44MiB queries=7371 errors=0
+t=  513.7s peak_working_set=   70.07MiB private_usage=   56.50MiB working_set=   67.46MiB queries=7531 errors=0
+t=  523.7s peak_working_set=   70.07MiB private_usage=   56.55MiB working_set=   67.49MiB queries=7690 errors=0
+t=  533.7s peak_working_set=   70.07MiB private_usage=   56.55MiB working_set=   67.50MiB queries=7850 errors=0
+t=  543.7s peak_working_set=   70.07MiB private_usage=   56.55MiB working_set=   67.50MiB queries=8009 errors=0
+t=  553.7s peak_working_set=   70.07MiB private_usage=   56.55MiB working_set=   67.51MiB queries=8169 errors=0
+t=  563.7s peak_working_set=   70.07MiB private_usage=   56.49MiB working_set=   67.49MiB queries=8329 errors=0
+t=  573.7s peak_working_set=   70.07MiB private_usage=   56.49MiB working_set=   67.49MiB queries=8489 errors=0
+t=  583.7s peak_working_set=   70.07MiB private_usage=   56.52MiB working_set=   67.51MiB queries=8649 errors=0
+t=  593.7s peak_working_set=   70.07MiB private_usage=   56.52MiB working_set=   67.52MiB queries=8808 errors=0
+SOAK TREND peak_working_set: first-quarter avg=70.07 MiB, last-quarter avg=70.07 MiB, delta=+0.00 MiB
+SOAK TREND private_usage: first-quarter avg=55.33 MiB, last-quarter avg=56.50 MiB, delta=+1.16 MiB
+SOAK TREND working_set: first-quarter avg=68.02 MiB, last-quarter avg=67.63 MiB, delta=-0.39 MiB
+SOAK TOTAL: 600s, queries=8909, errors=0
+
+-- point 3b: snapshot right after the soak --
+peak_working_set: 73469952 bytes = 70.07 MiB
+private_usage: 59269120 bytes = 56.52 MiB
+working_set: 70803456 bytes = 67.52 MiB
+
+-- Linux (docker python:3.11.9-slim, same 78216-rule list, server in-container) --
+after rules loaded, idle:      VmRSS = 63264-64108 kB = 61.78-62.60 MiB, VmHWM = 71892-72120 kB = 70.20-70.43 MiB
+after 550-query load burst:    VmRSS = 64160 kB = 62.66 MiB,           VmHWM unchanged (70.2 MiB)

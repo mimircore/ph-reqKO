@@ -229,3 +229,8 @@ docker/wireguard/
 .idea/
 .vscode/
 .vs/
+
+# objective-8: local demo/benchmark artifacts (never commit)
+/blocklist_big.txt
+/custom_ads.txt
+/demo_rules.txt
