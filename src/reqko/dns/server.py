@@ -114,8 +114,12 @@ def _disable_windows_udp_reset(sock: socket.socket) -> None:
     """Best-effort: silence ICMP-triggered resets on a UDP socket (Windows).
 
     Calls WSAIoctl directly — Python's socket.ioctl accepts only a fixed set
-    of commands and raises ValueError for SIO_UDP_CONNRESET.
+    of commands and raises ValueError for SIO_UDP_CONNRESET. No-op elsewhere:
+    the early return also lets mypy narrow sys.platform so the Windows-only
+    ctypes.windll access is not type-checked on Linux CI.
     """
+    if sys.platform != "win32":
+        return
     for control_code in (SIO_UDP_CONNRESET, SIO_UDP_NETRESET):
         flag = ctypes.c_ulong(0)  # FALSE: reset reporting off
         returned = ctypes.c_ulong(0)
