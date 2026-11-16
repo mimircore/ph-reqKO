@@ -70,13 +70,8 @@ async def _bootstrap_tokens(config: Config, conn: sqlite3.Connection) -> tuple[T
     return await loop.run_in_executor(None, _sync)
 
 
-async def _run(
-    config: Config, shutdown_event: asyncio.Event | None = None
-) -> None:
-    """Main async entrypoint: DNS servers and REST API in the same loop.
-
-    shutdown_event: optional pre-set event replacing the signal handlers
-    (used by the runtime tests to stop the server deterministically)."""
+async def _run(config: Config) -> None:
+    """Main async entrypoint: DNS servers and REST API in the same loop."""
     # ── Database ────────────────────────────────────────────────────────────
     conn = init_database(config.db_path)  # writer connection (single owner)
     read_conn = get_db_connection(config.db_path)  # API read connection (WAL)
@@ -292,24 +287,22 @@ async def _run(
 
     # ── Graceful shutdown on SIGINT/SIGTERM ─────────────────────────────────
     # loop.add_signal_handler is not supported on Windows (ProactorEventLoop)
-    # - fall back to signal.signal. Tests inject their own shutdown_event and
-    # skip signal registration entirely (no port 53, no global handlers).
+    # - fall back to signal.signal.
     loop = asyncio.get_running_loop()
-    stop_event = shutdown_event if shutdown_event is not None else asyncio.Event()
+    stop_event = asyncio.Event()
 
-    if shutdown_event is None:
-        def _shutdown() -> None:
-            logger.info("Shutdown signal received")
-            stop_event.set()
+    def _shutdown() -> None:
+        logger.info("Shutdown signal received")
+        stop_event.set()
 
-        for sig in (signal.SIGINT, signal.SIGTERM):
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _shutdown)
+        except NotImplementedError:
             try:
-                loop.add_signal_handler(sig, _shutdown)
-            except NotImplementedError:
-                try:
-                    signal.signal(sig, lambda _sig, _frame: _shutdown())
-                except (ValueError, OSError):
-                    pass
+                signal.signal(sig, lambda _sig, _frame: _shutdown())
+            except (ValueError, OSError):
+                pass
 
     await stop_event.wait()
 
